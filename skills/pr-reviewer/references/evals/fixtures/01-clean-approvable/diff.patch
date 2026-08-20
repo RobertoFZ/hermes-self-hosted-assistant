@@ -1,0 +1,98 @@
+diff --git a/dynamic_pricing/apps/web/services/routes/route_summary_service.py b/dynamic_pricing/apps/web/services/routes/route_summary_service.py
+index 1a2b3c4..5d6e7f8 100644
+--- a/dynamic_pricing/apps/web/services/routes/route_summary_service.py
++++ b/dynamic_pricing/apps/web/services/routes/route_summary_service.py
+@@ -12,6 +12,7 @@ from datetime import datetime, timezone
+
+ from dynamic_pricing.apps.web.models import CurrencyRate, Route
+
++SECONDS_PER_HOUR = 3600
+
+ class RouteSummaryService:
+     """Read-only aggregations for the route summary endpoint."""
+@@ -28,3 +29,16 @@ class RouteSummaryService:
+         routes = Route.objects.filter(provider=provider, deleted_at__isnull=True)
+         return routes.select_related("origin", "destination")
++
++    @staticmethod
++    def currency_rate_age_hours(rate: CurrencyRate, now: datetime | None = None) -> float:
++        """Return how many hours old the currency rate is, clamped at zero.
++
++        Args:
++            rate: The currency rate whose freshness is being measured.
++            now: Reference instant; defaults to the current UTC time.
++
++        Returns:
++            Age of the rate in hours, never negative.
++        """
++        reference = now or datetime.now(timezone.utc)
++        delta_seconds = (reference - rate.captured_at).total_seconds()
++        return max(0.0, delta_seconds / SECONDS_PER_HOUR)
+diff --git a/dynamic_pricing/apps/reserhub_api/serializers/v1/routes/route_summary_serializer.py b/dynamic_pricing/apps/reserhub_api/serializers/v1/routes/route_summary_serializer.py
+index 2b3c4d5..6e7f8a9 100644
+--- a/dynamic_pricing/apps/reserhub_api/serializers/v1/routes/route_summary_serializer.py
++++ b/dynamic_pricing/apps/reserhub_api/serializers/v1/routes/route_summary_serializer.py
+@@ -1,9 +1,11 @@
++from typing import ClassVar
++
+ from rest_framework import serializers
+
+ from dynamic_pricing.apps.web.models import Route
+ from dynamic_pricing.apps.web.services.routes.route_summary_service import (
+     RouteSummaryService,
+ )
+
+
+ class RouteSummarySerializer(serializers.ModelSerializer):
+     """Serializes a route summary row for the v1 summary endpoint."""
+
+     currency_rate_age_hours = serializers.SerializerMethodField()
+
+     class Meta:
+-        fields = ["id", "name"]
++        fields: ClassVar = ["id", "name", "currency_rate_age_hours"]
+         model = Route
++
++    def get_currency_rate_age_hours(self, route: Route) -> float | None:
++        """Return the age in hours of the route's active currency rate."""
++        rate = route.active_currency_rate
++        if rate is None:
++            return None
++        return RouteSummaryService.currency_rate_age_hours(rate)
+diff --git a/tests/unit/web/services/routes/test_route_summary_service.py b/tests/unit/web/services/routes/test_route_summary_service.py
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/tests/unit/web/services/routes/test_route_summary_service.py
+@@ -0,0 +1,33 @@
++from datetime import datetime, timedelta, timezone
++
++import pytest
++from expects import equal, expect
++
++from dynamic_pricing.apps.web.services.routes.route_summary_service import (
++    RouteSummaryService,
++)
++
++pytestmark = pytest.mark.django_db
++
++REFERENCE_NOW = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
++EXPECTED_AGE_HOURS = 5.0
++
++
++def test_currency_rate_age_hours_returns_elapsed_hours(currency_rate_factory) -> None:
++    captured_at = REFERENCE_NOW - timedelta(hours=EXPECTED_AGE_HOURS)
++    rate = currency_rate_factory(captured_at=captured_at)
++
++    age = RouteSummaryService.currency_rate_age_hours(rate, now=REFERENCE_NOW)
++
++    expect(age).to(equal(EXPECTED_AGE_HOURS))
++
++
++def test_currency_rate_age_hours_clamps_future_rate_to_zero(currency_rate_factory) -> None:
++    captured_at = REFERENCE_NOW + timedelta(hours=2)
++    rate = currency_rate_factory(captured_at=captured_at)
++
++    age = RouteSummaryService.currency_rate_age_hours(rate, now=REFERENCE_NOW)
++
++    expect(age).to(equal(0.0))

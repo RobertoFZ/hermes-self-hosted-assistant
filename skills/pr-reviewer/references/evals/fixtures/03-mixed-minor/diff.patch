@@ -1,0 +1,46 @@
+diff --git a/src/components/routes/RouteFiltersPanel.tsx b/src/components/routes/RouteFiltersPanel.tsx
+index 3c4d5e6..7f8a9b0 100644
+--- a/src/components/routes/RouteFiltersPanel.tsx
++++ b/src/components/routes/RouteFiltersPanel.tsx
+@@ -1,21 +1,38 @@
+ "use client";
+
+ import { useTranslations } from "next-intl";
+ import { RouteFilters } from "@/types/routes";
+
+ type Props = {
+   filters: RouteFilters;
+   tier: "low" | "high" | null;
+   onFilterChange: (next: RouteFilters) => void;
++  onClear: () => void;
+ };
+
+-export function RouteFiltersPanel({ filters, tier, onFilterChange }: Props) {
++export function RouteFiltersPanel({ filters, tier, onFilterChange, onClear }: Props) {
+   const t = useTranslations();
+
+   return (
+     <div className="flex items-center gap-3">
+-      {tier === "high" ? <span className="badge badge-high">{t("tier.high")}</span> : null}
++      {tier === "high" ? (
++        <span className="badge badge-high">{t("tier.high")}</span>
++      ) : tier === "low" ? (
++        <span className="badge badge-low">{t("tier.low")}</span>
++      ) : (
++        <span className="badge badge-muted">{t("tier.none")}</span>
++      )}
++
+       <input
+         type="text"
+         value={filters.search}
+-        onChange={(e) => onFilterChange({ ...filters, search: e.target.value })}
++        onChange={(event) => onFilterChange({ ...filters, search: event.target.value })}
+         placeholder={t("routes.searchPlaceholder")}
+       />
++
++      <button type="button" onClick={() => onClear()}>
++        {t("routes.clearFilters")}
++      </button>
+     </div>
+   );
+ }

@@ -1,0 +1,38 @@
+diff --git a/dynamic_pricing/apps/web/migrations/0262_tripobservation_captured_at_index.py b/dynamic_pricing/apps/web/migrations/0262_tripobservation_captured_at_index.py
+new file mode 100644
+index 0000000..1234abc
+--- /dev/null
++++ b/dynamic_pricing/apps/web/migrations/0262_tripobservation_captured_at_index.py
+@@ -0,0 +1,24 @@
++"""Add index on TripObservation.captured_at to speed up nightly forecast queries."""
++
++from django.db import migrations, models
++
++
++class Migration(migrations.Migration):
++    """Index captured_at on trip observations."""
++
++    dependencies = [
++        ("web", "0261_strategycoupon_tripfare_raw_price"),
++    ]
++
++    operations = [
++        migrations.AddIndex(
++            model_name="tripobservation",
++            index=models.Index(
++                fields=["captured_at"],
++                name="tripobs_captured_at_idx",
++            ),
++        ),
++    ]
+diff --git a/dynamic_pricing/apps/web/models/trip_observation.py b/dynamic_pricing/apps/web/models/trip_observation.py
+index aaa1111..bbb2222 100644
+--- a/dynamic_pricing/apps/web/models/trip_observation.py
++++ b/dynamic_pricing/apps/web/models/trip_observation.py
+@@ -22,6 +22,9 @@ class TripObservation(models.Model):
+
+     class Meta:
+         db_table = "trip_observation"
++        indexes = [
++            models.Index(fields=["captured_at"], name="tripobs_captured_at_idx"),
++        ]

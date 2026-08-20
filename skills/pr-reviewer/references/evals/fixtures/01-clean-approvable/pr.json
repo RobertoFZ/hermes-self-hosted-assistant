@@ -1,0 +1,9 @@
+{
+  "repo": "reservamos/price-engine-python",
+  "number": 9001,
+  "title": "[RM-900] Expose currency rate age in route summary",
+  "author": "rcastrejon",
+  "body": "Adds a typed helper on the route summary service to report how stale the currency rate is, and surfaces it read-only in the summary serializer. Includes a focused test.\n\nLinear: https://linear.app/reservamos/issue/RM-900",
+  "derived_from": "Pattern grounded in price-engine-python service/serializer + expects-test conventions; analogous to clean approvals like backend PR 3743/3755.",
+  "stack": "backend-django"
+}

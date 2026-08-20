@@ -1,0 +1,12 @@
+{
+  "event": "COMMENT",
+  "approved": false,
+  "cause_required": true,
+  "min_blocking_findings": 2,
+  "must_find_categories": ["security", "test_coverage"],
+  "forbidden_categories": [],
+  "min_comments": 2,
+  "max_comments": 5,
+  "cause_must_mention_any": ["provider", "scoping", "alcance", "test", "prueba", "cobertura", "seguridad", "permission", "AllowAny"],
+  "rationale": "Two blocking findings: (1) get_queryset returns Route.objects.all() with AllowAny — drops provider/deleted_at scoping, a cross-tenant data leak (security, blocker/major); (2) new public endpoint shipped with zero tests (test_coverage). Must NOT approve. Because there is MORE THAN ONE blocking finding, a terse top-level comment is required, naming the blocking reasons with no acknowledgments/filler."
+}

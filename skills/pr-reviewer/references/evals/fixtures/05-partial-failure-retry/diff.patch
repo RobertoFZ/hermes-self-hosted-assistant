@@ -1,0 +1,61 @@
+diff --git a/dynamic_pricing/apps/web/services/expired_strategy_deactivation_service.py b/dynamic_pricing/apps/web/services/expired_strategy_deactivation_service.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/dynamic_pricing/apps/web/services/expired_strategy_deactivation_service.py
+@@ -0,0 +1,32 @@
++from dynamic_pricing.apps.web.models import Strategy
++from dynamic_pricing.integrations.strategy_sync import notify_strategy_disabled
++
++
++class ExpiredStrategyDeactivationService:
++    @classmethod
++    def run(cls) -> list[int]:
++        failed_strategy_ids = []
++        strategies = Strategy.objects.filter(
++            status=True,
++            end_date__lt=timezone.localdate(),
++        )
++
++        for strategy in strategies:
++            try:
++                cls._deactivate(strategy)
++            except Exception:
++                failed_strategy_ids.append(strategy.id)
++
++        return failed_strategy_ids
++
++    @staticmethod
++    def _deactivate(strategy: Strategy) -> None:
++        strategy.status = False
++        strategy.save(update_fields=["status"])
++
++        strategy.trip_fares.update(active=False)
++        notify_strategy_disabled(strategy.id)
+diff --git a/tests/apps/web/services/test_expired_strategy_deactivation_service.py b/tests/apps/web/services/test_expired_strategy_deactivation_service.py
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/tests/apps/web/services/test_expired_strategy_deactivation_service.py
+@@ -0,0 +1,23 @@
++from expects import be_false, equal, expect
++
++from dynamic_pricing.apps.web.services.expired_strategy_deactivation_service import (
++    ExpiredStrategyDeactivationService,
++)
++
++
++def test_run_deactivates_expired_strategy(
++    expired_strategy,
++    active_trip_fare,
++):
++    active_trip_fare.strategy = expired_strategy
++    active_trip_fare.save()
++
++    failed_strategy_ids = ExpiredStrategyDeactivationService.run()
++
++    expired_strategy.refresh_from_db()
++    active_trip_fare.refresh_from_db()
++    expect(failed_strategy_ids).to(equal([]))
++    expect(expired_strategy.status).to(be_false)
++    expect(active_trip_fare.active).to(be_false)

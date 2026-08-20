@@ -1,0 +1,13 @@
+.env
+.review.env
+.hermes/
+.codex/
+data/
+**/auth.json
+**/hosts.yml
+.DS_Store
+backups/
+*.tar.gz
+*.tgz
+__pycache__/
+*.py[cod]

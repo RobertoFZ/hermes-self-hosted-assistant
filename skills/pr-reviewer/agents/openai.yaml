@@ -1,0 +1,4 @@
+interface:
+  display_name: "PR Reviewer"
+  short_description: "Discover, review, and publish Reserhub PR feedback"
+  default_prompt: "Use $pr-reviewer to discover every open ready Reserhub PR that needs my review, review it, and publish the resulting approval or comments automatically."

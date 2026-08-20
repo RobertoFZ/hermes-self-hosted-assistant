@@ -1,0 +1,9 @@
+{
+  "repo": "reservamos/price-engine-python",
+  "number": 9002,
+  "title": "[RM-901] Add index on TripObservation.captured_at for nightly queries",
+  "author": "Brayan244",
+  "body": "Nightly forecast queries filter TripObservation by captured_at and are slow. Adds an index.\n\nLinear: https://linear.app/reservamos/issue/RM-901",
+  "derived_from": "Inverts the SAFE real migration 0211_busline_seat_type_index.py (which correctly uses atomic=False + AddIndexConcurrently) into an UNSAFE in-transaction AddIndex on the large TripObservation table (~2.08B rows).",
+  "stack": "backend-django"
+}

@@ -1,0 +1,12 @@
+{
+  "event": "COMMENT",
+  "approved": false,
+  "cause_required": true,
+  "min_blocking_findings": 2,
+  "must_find_categories": ["correctness", "test_coverage"],
+  "forbidden_categories": [],
+  "min_comments": 2,
+  "max_comments": 4,
+  "cause_must_mention_any": ["estado", "status", "reintento", "retry", "fallo", "prueba", "cobertura"],
+  "rationale": "Two blocking findings: the first save makes a failed strategy ineligible for the next run, and tests cover only success rather than failure after the first write. Must not approve and must summarize both causes."
+}

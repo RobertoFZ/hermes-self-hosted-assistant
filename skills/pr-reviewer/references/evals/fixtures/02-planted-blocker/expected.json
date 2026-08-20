@@ -1,0 +1,11 @@
+{
+  "event": "COMMENT",
+  "approved": false,
+  "cause_required": false,
+  "min_blocking_findings": 1,
+  "must_find_categories": ["migration_safety"],
+  "forbidden_categories": [],
+  "min_comments": 1,
+  "max_comments": 4,
+  "rationale": "Single blocking finding: AddIndex on TripObservation (~2.08B rows) runs in-transaction, taking ACCESS EXCLUSIVE and blocking writes for hours. Must NOT approve (event=COMMENT). Because there is exactly ONE blocking finding, NO top-level comment is added — the lone inline comment carries the why."
+}

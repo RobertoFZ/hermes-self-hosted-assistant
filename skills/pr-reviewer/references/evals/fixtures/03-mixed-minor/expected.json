@@ -1,0 +1,10 @@
+{
+  "event": "APPROVE",
+  "approved": true,
+  "cause_required": false,
+  "must_find_categories": ["architecture"],
+  "forbidden_categories": ["correctness", "security", "migration_safety", "test_coverage"],
+  "min_comments": 1,
+  "max_comments": 4,
+  "rationale": "Only maintainability nits: nested ternary for conditional rendering should use react-if (If/Then/Else/Switch), and the inline onClick={() => onClear()} should be a named handler / passed directly. No correctness, security, migration, or missing-test issue (pure render tweak). Gate passes -> APPROVE, but still leave inline comments for the nits. Note: the e.target -> event.target rename and prettier-style formatting are CI-owned and must NOT be flagged."
+}

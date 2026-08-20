@@ -1,0 +1,41 @@
+diff --git a/dynamic_pricing/apps/reserhub_api/views/v1/routes/route_metrics_view.py b/dynamic_pricing/apps/reserhub_api/views/v1/routes/route_metrics_view.py
+new file mode 100644
+index 0000000..9abc123
+--- /dev/null
++++ b/dynamic_pricing/apps/reserhub_api/views/v1/routes/route_metrics_view.py
+@@ -0,0 +1,28 @@
++from typing import ClassVar
++
++from rest_framework.permissions import AllowAny
++from rest_framework.viewsets import ReadOnlyModelViewSet
++
++from dynamic_pricing.apps.reserhub_api.serializers.v1.routes.route_metrics_serializer import (
++    RouteMetricsSerializer,
++)
++from dynamic_pricing.apps.web.models import Route
++
++
++class RouteMetricsViewSet(ReadOnlyModelViewSet):
++    """Read-only revenue metrics per route."""
++
++    serializer_class = RouteMetricsSerializer
++    permission_classes: ClassVar = [AllowAny]
++
++    def get_queryset(self):
++        """Return all routes with their metrics."""
++        return Route.objects.all()
+diff --git a/dynamic_pricing/apps/reserhub_api/urls/v1/routes/__init__.py b/dynamic_pricing/apps/reserhub_api/urls/v1/routes/__init__.py
+index 1112223..3334445 100644
+--- a/dynamic_pricing/apps/reserhub_api/urls/v1/routes/__init__.py
++++ b/dynamic_pricing/apps/reserhub_api/urls/v1/routes/__init__.py
+@@ -3,6 +3,11 @@ from rest_framework.routers import DefaultRouter
+ from dynamic_pricing.apps.reserhub_api.views.v1.routes.route_summary_view import (
+     RouteSummaryViewSet,
+ )
++from dynamic_pricing.apps.reserhub_api.views.v1.routes.route_metrics_view import (
++    RouteMetricsViewSet,
++)
+
+ router = DefaultRouter()
+ router.register("summary", RouteSummaryViewSet, basename="route-summary")
++router.register("metrics", RouteMetricsViewSet, basename="route-metrics")

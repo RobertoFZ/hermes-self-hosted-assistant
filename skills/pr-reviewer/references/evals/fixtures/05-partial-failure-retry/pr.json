@@ -1,0 +1,9 @@
+{
+  "repo": "reservamos/price-engine-python",
+  "number": 9005,
+  "title": "[RM-905] Deactivate expired strategies safely",
+  "author": "RobertoFZ",
+  "body": "Deactivate every expired strategy while isolating failures so a later run can retry any item that did not complete. Linear: https://linear.app/reservamos/issue/RM-905",
+  "derived_from": "A recent review pattern where status=False is saved before dependent updates and external effects; an exception leaves partial state and the next run filters the item out.",
+  "stack": "backend-django"
+}

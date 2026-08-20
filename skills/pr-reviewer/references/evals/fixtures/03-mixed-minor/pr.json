@@ -1,0 +1,9 @@
+{
+  "repo": "reservamos/reserhub-revenue-web",
+  "number": 9003,
+  "title": "[RM-902] Add tier badge to route filters panel",
+  "author": "JIgnacioTG",
+  "body": "Adds a small tier badge next to the route filters and a clear-filters action.\n\nLinear: https://linear.app/reservamos/issue/RM-902",
+  "derived_from": "Grounded in real web review nits: react-if over ternary (PR 533), named useCallback over inline callbacks (PR 542/526), component decomposition. All maintainability minors, no correctness bug.",
+  "stack": "frontend-next"
+}

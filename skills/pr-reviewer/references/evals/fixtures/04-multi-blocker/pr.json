@@ -1,0 +1,9 @@
+{
+  "repo": "reservamos/price-engine-python",
+  "number": 9004,
+  "title": "[RM-903] Add public route metrics endpoint",
+  "author": "LuisLopez97",
+  "body": "Adds a read-only endpoint that returns route revenue metrics.\n\nLinear: https://linear.app/reservamos/issue/RM-903",
+  "derived_from": "Composed from two real backend finding types: dropped provider/deleted_at scoping in get_queryset (security/data-leak, like the provider-scoping convention) + new endpoint shipped without any test (test_coverage). Two blocking findings -> requires a terse top-level comment.",
+  "stack": "backend-django"
+}

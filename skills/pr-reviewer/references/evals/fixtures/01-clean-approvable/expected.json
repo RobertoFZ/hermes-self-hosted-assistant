@@ -1,0 +1,10 @@
+{
+  "event": "APPROVE",
+  "approved": true,
+  "cause_required": false,
+  "must_find_categories": [],
+  "forbidden_categories": ["correctness", "security", "migration_safety", "test_coverage"],
+  "min_comments": 0,
+  "max_comments": 2,
+  "rationale": "Stateless typed @staticmethod service, ClassVar on Meta.fields, provider+deleted_at scoping intact, proper AAA expects test with module constants and no magic numbers, no N+1. Nothing critical. Should APPROVE. At most a tiny nit is acceptable; none required."
+}
