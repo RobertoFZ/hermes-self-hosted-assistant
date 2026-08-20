@@ -43,6 +43,7 @@ select-model: ## Select the authenticated Hermes model interactively
 auth-github: ## Authenticate GitHub CLI interactively as the Hermes user
 	docker compose exec --user hermes hermes \
 		gh auth login --hostname github.com --git-protocol https --web
+	docker compose exec -T --user hermes hermes gh auth setup-git
 
 gateway-setup: ## Configure Slack, Telegram, or another messaging platform
 	docker compose exec hermes hermes gateway setup

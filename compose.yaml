@@ -24,6 +24,7 @@ services:
       HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: "${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:?set it in .env}"
       HERMES_DASHBOARD_BASIC_AUTH_SECRET: "${HERMES_DASHBOARD_BASIC_AUTH_SECRET:?set it in .env}"
       GH_CONFIG_DIR: "/opt/data/.config/gh"
+      GIT_CONFIG_GLOBAL: "/opt/data/.gitconfig"
       GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
     volumes:
       - hermes-data:/opt/data

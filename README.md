@@ -37,6 +37,7 @@ Important runtime locations:
 |---|---|---|
 | Hermes Codex OAuth | `/opt/data/auth.json` | Never |
 | GitHub CLI OAuth | `/opt/data/.config/gh/hosts.yml` | Never |
+| Native Git credential configuration | `/opt/data/.gitconfig` | Never |
 | Hermes configuration and integration secrets | `/opt/data/config.yaml`, `/opt/data/.env` | Never |
 | Sessions and pairings | `/opt/data/sessions` and Hermes runtime state | Never |
 | Review workspace | `/opt/data/repos/reserhub-revenue-full` | Never |
@@ -98,6 +99,11 @@ make auth-github
 make github-status
 ```
 
+`make auth-github` also configures native Git to use the persisted GitHub CLI
+credential. Compose fixes `GIT_CONFIG_GLOBAL` at `/opt/data/.gitconfig` so both
+interactive commands and Hermes tool subprocesses can authenticate even though
+they use different `HOME` directories.
+
 GitHub may require organization approval or SSO authorization. The authenticated
 account needs repository read access and Pull requests write permission to
 publish reviews.
@@ -125,6 +131,13 @@ review-only policy and restart:
 make apply-review-policy
 make restart
 make verify
+```
+
+If `make verify` reports that native Git cannot authenticate, refresh its
+credential helper without changing the existing OAuth login:
+
+```bash
+docker compose exec -T --user hermes hermes gh auth setup-git
 ```
 
 The Slack policy behaves as follows:
