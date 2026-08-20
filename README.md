@@ -1,4 +1,4 @@
-# Hermes PR Review Assistant
+# Hermes Self-Hosted Assistant
 
 Reproducible Docker Compose deployment of Hermes Agent as a GitHub pull-request
 review assistant. It uses the Hermes agent runtime with the `openai-codex`
@@ -220,8 +220,8 @@ On the VPS, install Docker and Make, clone this repository, create the local
 configuration files, and restore before starting Hermes:
 
 ```bash
-git clone REMOTE_URL hermes-pr-review-assistant
-cd hermes-pr-review-assistant
+git clone REMOTE_URL hermes-self-hosted-assistant
+cd hermes-self-hosted-assistant
 make init
 # Securely place or edit .env and .review.env now.
 make volume-restore BACKUP_FILE=/absolute/secure/path/hermes-data.tgz

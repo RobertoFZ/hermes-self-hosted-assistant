@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
       args:
         HERMES_BASE_IMAGE: "${HERMES_BASE_IMAGE:-nousresearch/hermes-agent:latest}"
-    image: "${HERMES_LOCAL_IMAGE:-hermes-pr-review-assistant:local}"
+    image: "${HERMES_LOCAL_IMAGE:-hermes-self-hosted-assistant:local}"
     restart: unless-stopped
     command: ["gateway", "run"]
     stdin_open: true
