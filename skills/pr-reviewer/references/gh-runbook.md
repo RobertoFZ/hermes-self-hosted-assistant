@@ -13,6 +13,7 @@ All commands use `--repo <owner>/<repo>` so they work from anywhere.
 - Read current-head context
 - Re-review prior comments
 - Handle scratch data safely
+- Handle explicitly requested self-reviews
 - Submit approve/comment reviews
 - Language policy
 
@@ -29,7 +30,7 @@ gh pr list --repo <owner>/<repo> --state open --draft=false \
   --json number,title,author,isDraft,headRefOid,reviewDecision,updatedAt --limit 50
 ```
 
-Author scope — **by default exclude your own PRs** (no self-review). Filter client-side on the JSON above:
+Author scope — **by default exclude your own PRs**. A direct PR number/URL or an explicit request to include/review your own PRs overrides discovery filtering, but never the prohibition on self-approval. Filter client-side on the JSON above:
 ```bash
 ME=$(gh api user --jq .login)
 # keep only PRs NOT authored by you (default):
@@ -145,11 +146,27 @@ If an intermediate artifact is unavoidable, write it beneath
 or worktree, and remove it after use. Do not unset or broaden
 `HERMES_WRITE_SAFE_ROOT` to accommodate scratch data.
 
+## Explicitly requested self-reviews
+
+Before choosing the review event, compare the authenticated account with the PR author:
+
+```bash
+ME=$(gh api user --jq .login)
+AUTHOR=$(gh pr view <n> --repo <owner>/<repo> --json author --jq .author.login)
+```
+
+When `AUTHOR == ME`, continue only because the user directly named the PR or explicitly asked to include/review their own PRs. Analyze it with the same categories, severity rubric, and findings gate, but **never send `event=APPROVE`** because GitHub does not allow an author to approve their own PR. Submit `event=COMMENT` instead:
+
+- With findings, keep the normal inline-comment and blocking-summary rules below.
+- With no findings or inline comments, send a visible result with `-f event=COMMENT -f body='Autorrevisión solicitada: no encontré hallazgos, pero GitHub no permite aprobar un PR propio.'`.
+
+Do not manufacture a finding to justify `COMMENT`; self-authorship is a submission constraint, not a code defect.
+
 ## Submit the review
 
 You only ever submit one of two events: **APPROVE** or **COMMENT**. Never `REQUEST_CHANGES`.
 
-### Gate passes → APPROVE
+### Gate passes and the PR is not self-authored → APPROVE
 
 **No top-level body** — the approval event itself communicates it; don't add a note saying the PR is approved. Attach inline comments only for any `minor`/`nit` you still want to leave.
 

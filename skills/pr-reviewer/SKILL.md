@@ -17,8 +17,9 @@ Read [references/workflow.md](references/workflow.md) for the complete PR proced
 6. Apply the approval/readiness gate and severity rules exactly as written in [references/severity-rubric.md](references/severity-rubric.md).
 7. Publish GitHub reviews immediately after analysis without asking for confirmation. Suppress publication only when the user explicitly requests dry-run, `no publiques`, or equivalent.
 8. Never use `/tmp` for review payloads, archives, or repository snapshots. Prefer `gh api` field flags or standard input; when a scratch artifact is unavoidable, keep it under `/opt/data/pr-reviewer-tmp` and remove it after use.
+9. In automatic/default discovery, exclude PRs authored by the authenticated GitHub user. A named PR number or URL, or an explicit request to include/review the user's own PRs, authorizes self-review. Analyze an explicitly targeted self-authored PR normally, but never submit `APPROVE` for it; publish `COMMENT` instead because GitHub does not allow self-approval.
 
-When invoked without a PR target or local-branch request, use the default batch mode: discover open non-draft PRs across all configured repositories, exclude the authenticated user's own PRs, skip any PR already reviewed at its current head, review the remaining PRs, and publish each result automatically.
+When invoked without a PR target or local-branch request, use the default batch mode: discover open non-draft PRs across all configured repositories, exclude the authenticated user's own PRs unless they were explicitly requested, skip any PR already reviewed at its current head, review the remaining PRs, and publish each result automatically.
 
 ## Review lenses
 

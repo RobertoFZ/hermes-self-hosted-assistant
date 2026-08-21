@@ -6,7 +6,7 @@ You review PRs and either **approve** them or leave **non-blocking comments**. Y
 ## Modes
 
 - **Default batch** — a bare `/pr-reviewer` invocation, or any request without a specific PR/local branch, discovers open non-draft PRs across the monorepo root and five submodules. Identify which PRs need review, review them, and publish each result automatically. See "Batch mode" below.
-- **Single PR** — given a PR number or URL (and a repo, if not clear from the URL). Run the Procedure once.
+- **Single PR** — given a PR number or URL (and a repo, if not clear from the URL). The named target is explicit authorization to review that PR even when the authenticated GitHub user authored it. Run the Procedure once; self-authored PRs publish `COMMENT`, never `APPROVE`.
 - **Scoped batch** — when the user names one or more repositories without a PR, discover and process open non-draft PRs only in that scope.
 - **Dry-run** — only when the user explicitly says dry-run / "no publiques" / no-publish, do everything except the final `gh` submit; emit the dry-run output contract instead (per PR). Works in both single and batch mode.
 - **Local pre-PR** — "review my branch", "pre-PR review", "revisa mi rama antes del PR". Read `references/local-branch-workflow.md`, compare the current branch and working tree with the correct mainline, and emit a local readiness report. Never post to GitHub or mutate Git state.
@@ -30,16 +30,18 @@ This skill exists because CI (Ruff/ESLint/Prettier/Black/Biome, TypeScript, Band
 4. **All GitHub output in informal `tú` Spanish.** Friendly, direct. No character judgments, no motivational filler, no emoji, no `nit:`/`bloqueante:` prefixes. See `references/comment-style.md`.
 5. **Local mode is read-only.** Never commit, push, checkout, reset, rebase, stash, create a PR, or submit a review. Match the user's language in the local report.
 6. **Publish by default.** For single-PR and batch GitHub modes, submit the resulting `APPROVE` or `COMMENT` immediately after analysis. The skill invocation itself authorizes publication; do not ask for another confirmation. Only an explicit dry-run / `no publiques` / no-publish request suppresses submission.
+7. **Never self-approve.** Default discovery excludes PRs authored by the authenticated GitHub user. An explicit PR number/URL or a request to include the user's PRs permits the review, but the result must be submitted as `COMMENT`, even when the technical findings gate passes.
 
 ## The decision gate — the ONLY path to APPROVE
 
 ```
-APPROVE  ⇔  ( findings in {correctness, security, migration_safety, test_coverage} == 0  at ANY severity )
+APPROVE  ⇔  ( PR author.login != authenticated GitHub login )
+            AND ( findings in {correctness, security, migration_safety, test_coverage} == 0  at ANY severity )
             AND ( findings with severity in {blocker, major} == 0  anywhere )
 else      →  DO NOT approve  (submit event=COMMENT)
 ```
 
-There is no other path to approval. A single correctness / security / migration_safety / test_coverage finding at *any* severity blocks approval. A single `blocker` or `major` in *any* category blocks approval. Everything else (`minor`/`nit` in non-critical categories) still approves — you leave the comments inline and approve anyway. This matches how the team works: *"Aprobado con comentarios no bloqueantes de mantenibilidad."*
+There is no other path to approval. A single correctness / security / migration_safety / test_coverage finding at *any* severity blocks approval. A single `blocker` or `major` in *any* category blocks approval. For a PR authored by someone else, everything else (`minor`/`nit` in non-critical categories) still approves — you leave the comments inline and approve anyway. An explicitly requested self-review always uses `COMMENT`; this is a GitHub authorship constraint, not an invented finding.
 
 ## GitHub PR procedure
 
@@ -49,7 +51,7 @@ There is no other path to approval. A single correctness / security / migration_
    sibling searches. This fetches refs only; never pull, checkout, reset, or
    update submodules during a review.
 
-1. **Identify the repo and PR.** From the PR number/URL determine the repo: `reservamos/reserhub-revenue-full` (monorepo coordination/OpenSpec), `reservamos/price-engine-python` (backend Django), `reservamos/reserhub-intelligence-api` (Django AI/analytics), `reservamos/reserhub-revenue-web` (frontend Next.js/React), `reservamos/reserhub-revenue-admin` (frontend admin, Next.js/React), or `reservamos/scrapers-swarm` (Bun/TypeScript + Prisma scraper service). If ambiguous, ask.
+1. **Identify the repo, PR, and authorship.** From the PR number/URL determine the repo: `reservamos/reserhub-revenue-full` (monorepo coordination/OpenSpec), `reservamos/price-engine-python` (backend Django), `reservamos/reserhub-intelligence-api` (Django AI/analytics), `reservamos/reserhub-revenue-web` (frontend Next.js/React), `reservamos/reserhub-revenue-admin` (frontend admin, Next.js/React), or `reservamos/scrapers-swarm` (Bun/TypeScript + Prisma scraper service). If ambiguous, ask. Resolve `ME=$(gh api user --jq .login)` and compare it with the PR's `author.login` before choosing the submission event. A directly named PR is an explicit target, so continue when it is self-authored, but record that publication is restricted to `COMMENT`.
 
 2. **Load the diff and context** (read-only):
    - `gh pr view <n> --repo <owner/repo> --json title,body,files,additions,deletions,author,commits,headRefName,headRefOid,baseRefName,statusCheckRollup`
@@ -108,7 +110,7 @@ There is no other path to approval. A single correctness / security / migration_
    - **Comment impact:** don't re-post the same comment text verbatim. If still open, leave a brief reply on the **existing thread** noting it's pending (or fold it into the gate's blocking reasons); if resolved, say nothing. The anti-duplication rule (step 2) means *don't repeat*, not *don't count*.
    - In batch mode, report per PR which prior findings were **resolved** vs **still pending**.
 
-9. **Apply the gate** above to decide `APPROVE` vs `COMMENT`.
+9. **Apply the gate** above to decide `APPROVE` vs `COMMENT`, including the authorship condition. Never attempt `APPROVE` when `author.login == ME`.
 
 10. **Write comments** in `tú` Spanish per `references/comment-style.md`: each = woven reason (the *why*, as a leading clause — no literal "Por qué" label required) + a concrete suggestion when one applies. For a cross-repo break, put the comment on the producer line in this PR's diff and cite the consumer as `repo/path:line`.
 
@@ -117,7 +119,8 @@ There is no other path to approval. A single correctness / security / migration_
      Never stage payloads or repository snapshots under `/tmp`; use
      `/opt/data/pr-reviewer-tmp` only when an intermediate artifact is
      unavoidable, then remove it after submission.
-   - **Gate passes →** `event=APPROVE` with **no top-level body** — the approval itself signals it, so don't add a note telling the teammate the PR is approved. Still attach inline comments for any `minor`/`nit`.
+   - **Gate passes and the PR is not self-authored →** `event=APPROVE` with **no top-level body** — the approval itself signals it, so don't add a note telling the teammate the PR is approved. Still attach inline comments for any `minor`/`nit`.
+   - **Explicit self-review →** always use `event=COMMENT`. Preserve the normal inline comments and blocking-summary rules when findings exist. When there are no findings or inline comments, use the concise top-level body `Autorrevisión solicitada: no encontré hallazgos, pero GitHub no permite aprobar un PR propio.` so the requested review has a visible result.
    - **Gate fails →** `event=COMMENT` with one inline comment per finding. Add a **top-level comment only when there is more than one blocking finding** — and then it states *only* the blocking reasons, tersely, with no acknowledgments or filler (no "gracias", no "buen trabajo", no "no lo apruebo todavía…"). With exactly one blocking finding, omit the top-level comment; the lone inline comment carries the why.
    - A **blocking finding** = any finding in a critical category (`correctness`, `security`, `migration_safety`, `test_coverage`) at any severity, OR any `blocker`/`major` finding in any category.
    - **Never** `gh pr merge`.
@@ -140,7 +143,7 @@ Use this mode by default when the skill is invoked without a specific PR or loca
    gh pr list --repo <owner>/<repo> --state open --draft=false \
      --json number,title,author,isDraft,headRefOid,reviewDecision,updatedAt --limit 50
    ```
-   **Author scope — default excludes your own PRs.** You don't self-review, so by default **drop PRs authored by the authenticated user** (`ME=$(gh api user --jq .login)`; keep only `author.login != ME`). Review your own **only when the user asks explicitly** ("revisa los míos" / "review my PRs" / "incluye los míos") — then either include them alongside the rest, or, if the user asks for *only* yours, scope to `author.login == ME` (equivalently `gh pr list --author "@me"`). State which scope you applied in the plan (step 5).
+   **Author scope — default excludes your own PRs.** By default **drop PRs authored by the authenticated user** (`ME=$(gh api user --jq .login)`; keep only `author.login != ME`). Include your own only when the user asks explicitly ("revisa los míos" / "review my PRs" / "incluye los míos") or directly names one by PR number/URL. Then either include them alongside the rest or, if the user asks for *only* yours, scope to `author.login == ME` (equivalently `gh pr list --author "@me"`). Every included self-authored PR is reviewed normally but published as `COMMENT`, never `APPROVE`. State which scope you applied in the plan (step 5).
 
 3. **Skip what you've already reviewed** (idempotency — don't re-post on every run). For each PR, check whether the authenticated user already submitted a review on the current head commit:
    ```bash
@@ -194,8 +197,8 @@ When invoked in **dry-run or eval mode** (a local fixture, `--dry-run`, or no re
 ```
 
 - `event` is `"APPROVE"` or `"COMMENT"` only.
-- `approved` is `true` iff `event == "APPROVE"`; both must agree with the gate.
-- `top_level_comment` is set **only when not approved AND there is more than one blocking finding** — a terse Spanish string stating just the blocking reasons (no acknowledgments/filler). Otherwise (approved, or not approved with a single blocking finding) it is `null`.
+- `approved` is `true` iff `event == "APPROVE"`; both must agree with the findings and authorship gate. A self-authored PR always emits `"event": "COMMENT"` and `"approved": false`.
+- `top_level_comment` is set **only when not approved AND there is more than one blocking finding** — a terse Spanish string stating just the blocking reasons (no acknowledgments/filler). The one exception is a zero-finding explicit self-review: set it to `Autorrevisión solicitada: no encontré hallazgos, pero GitHub no permite aprobar un PR propio.` so the `COMMENT` review has a visible result. Otherwise (approved, or not approved with a single blocking finding) it is `null`.
 - A **blocking finding** = any comment whose `category` is critical (`correctness`/`security`/`migration_safety`/`test_coverage`) at any severity, or whose `severity` is `blocker`/`major`.
 - Each comment carries a valid `severity` (`blocker`/`major`/`minor`/`nit`) and `category` (one of the 7). `body` is in Spanish.
 

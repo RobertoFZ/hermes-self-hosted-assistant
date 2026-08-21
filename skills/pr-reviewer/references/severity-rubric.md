@@ -5,16 +5,19 @@ Four levels: `blocker` · `major` · `minor` · `nit`.
 ## What affects the gate
 
 ```
-APPROVE  ⇔  ( findings in {correctness, security, migration_safety, test_coverage} == 0  at ANY severity )
+APPROVE  ⇔  ( PR author.login != authenticated GitHub login )
+            AND ( findings in {correctness, security, migration_safety, test_coverage} == 0  at ANY severity )
             AND ( findings with severity in {blocker, major} == 0  anywhere )
 else      →  DO NOT approve
 ```
 
-So two independent things block approval:
-1. **Any** finding in a critical category (`correctness`, `security`, `migration_safety`, `test_coverage`) — even a `nit`.
-2. **Any** `blocker` or `major` finding, in any category.
+So three independent things block approval:
 
-`minor`/`nit` findings in non-critical categories (`architecture`, `error_handling`, `data_layer` non-migration, `scraper`) do **not** block — you approve and leave them inline.
+1. A **self-authored PR**. Review it only when the user explicitly targets it or asks to include their own PRs, and publish the result as `COMMENT`; never attempt self-approval.
+2. **Any** finding in a critical category (`correctness`, `security`, `migration_safety`, `test_coverage`) — even a `nit`.
+3. **Any** `blocker` or `major` finding, in any category.
+
+For PRs authored by someone else, `minor`/`nit` findings in non-critical categories (`architecture`, `error_handling`, `data_layer` non-migration, `scraper`) do **not** block — you approve and leave them inline. On an explicitly requested self-review, the same findings remain non-blocking, but the submission event is still `COMMENT` because of authorship.
 
 ## Levels
 
