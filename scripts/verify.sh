@@ -12,10 +12,11 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   gh auth status --active --hostname github.com
   git config --global --get-regexp "^credential\\.https://github\\.com\\.helper$" | grep -F "gh auth git-credential" >/dev/null
   GIT_TERMINAL_PROMPT=0 git -C "$REVIEW_MONOREPO_ROOT" ls-remote --exit-code origin HEAD >/dev/null
+  test "$(openspec --version)" = "$OPENSPEC_VERSION"
   hermes skills list | grep -F pr-reviewer >/dev/null
   hermes plugins list | grep -F slack-pr-review-gate >/dev/null
   /opt/data/skills/custom/pr-reviewer/scripts/prepare-workspace.sh --check
   test "$(hermes config get terminal.cwd)" = "$REVIEW_MONOREPO_ROOT"
 '
 
-echo "Hermes provider, GitHub login, skill, plugin, and workspace are ready."
+echo "Hermes provider, GitHub login, OpenSpec, skill, plugin, and workspace are ready."

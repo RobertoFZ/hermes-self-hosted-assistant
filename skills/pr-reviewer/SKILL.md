@@ -27,6 +27,7 @@ When invoked without a PR target or local-branch request, use the default batch 
 - Load [references/cross-repo-impact.md](references/cross-repo-impact.md) for contract changes.
 - Load [references/migration-safety.md](references/migration-safety.md) for database migrations.
 - Load [references/gh-runbook.md](references/gh-runbook.md) before submitting any review.
+- For changed OpenSpec artifacts, run strict validation from the resolved monorepo root. Use validation commands only; never run `openspec init`, `openspec update`, `openspec archive`, or another command that rewrites repository files.
 
 Use `gh` for GitHub PR reads and writes, read-only `git` commands for local reviews, and the configured Linear connector for ticket context. In batch mode, use parallel review workers only when the active collaboration policy permits; otherwise process sequentially without changing the decision rules.
 

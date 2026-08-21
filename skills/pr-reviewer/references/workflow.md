@@ -82,6 +82,13 @@ There is no other path to approval. A single correctness / security / migration_
      SHA diff is not sufficient. Prefer a linked same-key submodule PR; otherwise
      use `git -C <submodule> diff <old-sha> <new-sha>` when both objects exist,
      or the GitHub compare API without checking out branches.
+     When the diff changes files under `openspec/`, run
+     `openspec validate <change-name> --strict` from `MONOREPO_ROOT` for every
+     affected active change. For canonical specs or configuration without an
+     active change directory, use the strict validation command prescribed by
+     the root guidance. Treat validation failures as review evidence. Never run
+     `openspec init`, `openspec update`, `openspec archive`, or another mutating
+     OpenSpec command during a review.
    - **Price Engine backend** (`price-engine-python`): load the **`backend-django-guidance`** skill before judging architecture or data-layer behavior, and **`backend-test-guidance`** before judging tests. Also load `price-engine-python/AGENTS.md`, `docs/agents/code-style.md`, and `docs/agents/testing-guidelines.md` from that submodule.
    - **Intelligence API** (`reserhub-intelligence-api`): load `reserhub-intelligence-api/.agents/skills/bootstrap/SKILL.md` first, then the relevant local skills it selects, including `backend-django-guidance`, `backend-test-guidance`, and `backend-db-safety-guidance` for migration or data-layer changes. Follow its own `AGENTS.md` and `docs/agents/` guidance rather than the Price Engine rules.
    - **Revenue web** (`reserhub-revenue-web`): load **`frontend-next-guidance`**, plus **`frontend-test-guidance`** when the diff changes tests or browser-visible behavior. `react-doctor` runs in pre-commit, so **defer to it** (subtract its component-quality findings). Optionally run `npx -y react-doctor@0.0.30 <changed files>` to see what it already covers, then focus on runtime correctness and repo conventions.

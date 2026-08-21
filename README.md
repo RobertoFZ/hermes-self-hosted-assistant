@@ -13,6 +13,7 @@ runtime files.
 
 - OpenAI Codex provider authenticated through ChatGPT OAuth
 - GitHub CLI OAuth for reading PRs and publishing `APPROVE` or `COMMENT`
+- Pinned OpenSpec CLI for strict validation of specification changes
 - Persistent Hermes state, credentials, sessions, skills, and review checkout
 - Review-only Slack channel and delegated-reviewer DMs
 - Optional Telegram or other Hermes gateway integrations
@@ -80,6 +81,10 @@ make build
 make up
 make sync-skills
 ```
+
+The derived image installs the OpenSpec CLI version pinned by the Reserhub
+workspace (`1.6.0` by default). Override `OPENSPEC_VERSION` only when the
+workspace tooling policy moves to a different version.
 
 Authenticate the ChatGPT/Codex subscription interactively:
 

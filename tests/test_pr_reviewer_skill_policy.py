@@ -25,6 +25,13 @@ class PRReviewerSkillPolicyTests(unittest.TestCase):
         self.assertIn("Do not unset or broaden", GH_RUNBOOK)
         self.assertNotIn("HERMES_WRITE_SAFE_ROOT=/opt/data:/tmp", GH_RUNBOOK)
 
+    def test_openspec_reviews_validate_without_mutating(self):
+        self.assertIn("run strict validation", SKILL)
+        self.assertIn("openspec validate <change-name> --strict", WORKFLOW)
+        for command in ("init", "update", "archive"):
+            self.assertIn(f"`openspec {command}`", SKILL)
+            self.assertIn(f"`openspec {command}`", WORKFLOW)
+
 
 if __name__ == "__main__":
     unittest.main()
