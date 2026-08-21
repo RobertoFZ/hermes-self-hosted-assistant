@@ -12,6 +12,7 @@ All commands use `--repo <owner>/<repo>` so they work from anywhere.
 - Discover PRs
 - Read current-head context
 - Re-review prior comments
+- Handle scratch data safely
 - Submit approve/comment reviews
 - Language policy
 
@@ -131,6 +132,18 @@ For each prior **blocking** comment, judge against the new head: **resolved** (f
 gh api repos/<owner>/<repo>/pulls/<n>/comments/<comment_id>/replies \
   -f body='Sigue pendiente esto: <razón breve>.'
 ```
+
+## Handle scratch data safely
+
+Prefer the `gh api` field flags shown below or pass JSON through standard input;
+do not create a payload file merely to submit a review. Never write review
+payloads, downloaded archives, or extracted repository snapshots under `/tmp`:
+the Hermes container restricts file-tool writes to `/opt/data`.
+
+If an intermediate artifact is unavoidable, write it beneath
+`/opt/data/pr-reviewer-tmp/<repo>-<pr>-<head>/`, never inside a review checkout
+or worktree, and remove it after use. Do not unset or broaden
+`HERMES_WRITE_SAFE_ROOT` to accommodate scratch data.
 
 ## Submit the review
 

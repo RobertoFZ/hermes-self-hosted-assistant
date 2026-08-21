@@ -16,6 +16,7 @@ Read [references/workflow.md](references/workflow.md) for the complete PR proced
 5. Write all GitHub-facing text in informal `tú` Spanish using [references/comment-style.md](references/comment-style.md). Match the user's language for local reports.
 6. Apply the approval/readiness gate and severity rules exactly as written in [references/severity-rubric.md](references/severity-rubric.md).
 7. Publish GitHub reviews immediately after analysis without asking for confirmation. Suppress publication only when the user explicitly requests dry-run, `no publiques`, or equivalent.
+8. Never use `/tmp` for review payloads, archives, or repository snapshots. Prefer `gh api` field flags or standard input; when a scratch artifact is unavoidable, keep it under `/opt/data/pr-reviewer-tmp` and remove it after use.
 
 When invoked without a PR target or local-branch request, use the default batch mode: discover open non-draft PRs across all configured repositories, exclude the authenticated user's own PRs, skip any PR already reviewed at its current head, review the remaining PRs, and publish each result automatically.
 

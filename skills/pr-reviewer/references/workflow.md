@@ -106,6 +106,10 @@ There is no other path to approval. A single correctness / security / migration_
 10. **Write comments** in `tú` Spanish per `references/comment-style.md`: each = woven reason (the *why*, as a leading clause — no literal "Por qué" label required) + a concrete suggestion when one applies. For a cross-repo break, put the comment on the producer line in this PR's diff and cite the consumer as `repo/path:line`.
 
 11. **Submit via the gh runbook** (`references/gh-runbook.md`):
+   - Transmit review data directly with `gh api` field flags or standard input.
+     Never stage payloads or repository snapshots under `/tmp`; use
+     `/opt/data/pr-reviewer-tmp` only when an intermediate artifact is
+     unavoidable, then remove it after submission.
    - **Gate passes →** `event=APPROVE` with **no top-level body** — the approval itself signals it, so don't add a note telling the teammate the PR is approved. Still attach inline comments for any `minor`/`nit`.
    - **Gate fails →** `event=COMMENT` with one inline comment per finding. Add a **top-level comment only when there is more than one blocking finding** — and then it states *only* the blocking reasons, tersely, with no acknowledgments or filler (no "gracias", no "buen trabajo", no "no lo apruebo todavía…"). With exactly one blocking finding, omit the top-level comment; the lone inline comment carries the why.
    - A **blocking finding** = any finding in a critical category (`correctness`, `security`, `migration_safety`, `test_coverage`) at any severity, OR any `blocker`/`major` finding in any category.
