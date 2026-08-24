@@ -220,6 +220,7 @@ make chat                 # interactive terminal chat
 make codex                # open Codex in the configured monorepo root
 make auth-codex-cli       # authenticate the standalone Codex CLI
 make codex-cli-status     # verify standalone Codex authentication
+make check-tool-updates   # check npm for newer Codex and Paseo releases
 make paseo-status         # show Paseo daemon status
 make paseo-logs           # follow Paseo daemon logs
 make paseo-register-workspace # register the review monorepo

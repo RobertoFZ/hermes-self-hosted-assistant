@@ -13,6 +13,9 @@ PASEO_ENTRYPOINT = (ROOT / "scripts" / "paseo-entrypoint.sh").read_text(
 )
 PASEO_CONFIG = (ROOT / "scripts" / "paseo-config.json").read_text(encoding="utf-8")
 DOCKERIGNORE = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+UPDATE_CHECK = (ROOT / "scripts" / "check-tool-updates.sh").read_text(
+    encoding="utf-8"
+)
 
 
 class DeploymentToolingPolicyTests(unittest.TestCase):
@@ -35,6 +38,16 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
     def test_codex_make_target_uses_the_configured_monorepo_root(self):
         self.assertIn("codex: ## Open Codex CLI", MAKEFILE)
         self.assertIn('cd "$$REVIEW_MONOREPO_ROOT"; exec codex', MAKEFILE)
+
+    def test_tool_update_check_is_read_only_and_checks_both_npm_packages(self):
+        self.assertIn("check-tool-updates: ##", MAKEFILE)
+        self.assertIn('npm view --silent "@openai/codex" dist-tags.latest', UPDATE_CHECK)
+        self.assertIn(
+            'npm view --silent "@getpaseo/cli" dist-tags.latest', UPDATE_CHECK
+        )
+        self.assertIn("codex --version", UPDATE_CHECK)
+        self.assertIn("paseo --version", UPDATE_CHECK)
+        self.assertNotIn("npm install", UPDATE_CHECK)
 
     def test_openspec_is_pinned_in_the_image(self):
         self.assertIn("ARG OPENSPEC_VERSION=1.6.0", DOCKERFILE)

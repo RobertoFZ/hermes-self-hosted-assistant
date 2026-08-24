@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help init bootstrap build up down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status paseo-up paseo-status paseo-logs paseo-register-workspace paseo-pair paseo-provider-status auth-github gateway-setup sync-skills install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
+.PHONY: help init bootstrap build up down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status check-tool-updates paseo-up paseo-status paseo-logs paseo-register-workspace paseo-pair paseo-provider-status auth-github gateway-setup sync-skills install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
 
 help: ## Show the available commands
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -49,6 +49,9 @@ auth-codex-cli: ## Authenticate the standalone Codex CLI with device code
 
 codex-cli-status: ## Verify standalone Codex CLI authentication
 	docker compose exec -T --user hermes hermes codex login status
+
+check-tool-updates: ## Check npm for newer Codex and Paseo releases
+	./scripts/check-tool-updates.sh
 
 paseo-up: ## Start the Paseo daemon and bundled web UI
 	docker compose up -d paseo
