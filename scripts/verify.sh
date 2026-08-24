@@ -22,4 +22,13 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   test "$(hermes config get terminal.cwd)" = "$REVIEW_MONOREPO_ROOT"
 '
 
-echo "Hermes provider, Codex CLI, GitHub login, OpenSpec, skill, plugin, and workspace are ready."
+docker compose exec -T --user hermes paseo /bin/sh -eu -c '
+  : "${REVIEW_MONOREPO_ROOT:?set it in .review.env}"
+  test "$(paseo --version)" = "$PASEO_VERSION"
+  codex login status
+  curl --fail --silent --show-error http://127.0.0.1:6767/api/health >/dev/null
+  paseo provider diagnostic --host 127.0.0.1:6767 --json codex >/dev/null
+  paseo project ls --host 127.0.0.1:6767 --json | grep -F "$REVIEW_MONOREPO_ROOT" >/dev/null
+'
+
+echo "Hermes, Codex CLI, Paseo, GitHub, OpenSpec, skill, plugin, and workspace are ready."

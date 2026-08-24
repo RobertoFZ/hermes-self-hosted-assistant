@@ -1,5 +1,4 @@
-services:
-  hermes:
+x-hermes-runtime: &hermes-runtime
     build:
       context: .
       dockerfile: Dockerfile
@@ -7,7 +6,12 @@ services:
         HERMES_BASE_IMAGE: "${HERMES_BASE_IMAGE:-nousresearch/hermes-agent:latest}"
         CODEX_VERSION: "${CODEX_VERSION:-0.149.1}"
         OPENSPEC_VERSION: "${OPENSPEC_VERSION:-1.6.0}"
+        PASEO_VERSION: "${PASEO_VERSION:-0.5.2}"
     image: "${HERMES_LOCAL_IMAGE:-hermes-self-hosted-assistant:local}"
+
+services:
+  hermes:
+    <<: *hermes-runtime
     restart: unless-stopped
     command: ["gateway", "run"]
     stdin_open: true
@@ -38,6 +42,35 @@ services:
         source: ./skills/pr-reviewer
         target: /opt/global-skills/pr-reviewer
         read_only: true
+
+  paseo:
+    <<: *hermes-runtime
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/paseo-entrypoint"]
+    depends_on:
+      hermes:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${PASEO_HOST_PORT:-6767}:6767"
+    env_file:
+      - .review.env
+    environment:
+      HOME: "/opt/data"
+      HERMES_UID: "${HERMES_UID:-10000}"
+      HERMES_GID: "${HERMES_GID:-10000}"
+      PASEO_HOME: "/opt/data/.paseo"
+      PASEO_PASSWORD: "${PASEO_PASSWORD:?set it in .env}"
+      GH_CONFIG_DIR: "/opt/data/.config/gh"
+      GIT_CONFIG_GLOBAL: "/opt/data/.gitconfig"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+    volumes:
+      - hermes-data:/opt/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:6767/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
 volumes:
   hermes-data:

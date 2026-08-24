@@ -13,14 +13,15 @@ runtime files.
 
 - OpenAI Codex provider authenticated through ChatGPT OAuth
 - Pinned standalone Codex CLI with its own persistent ChatGPT OAuth
+- Pinned Paseo daemon and web UI for using that Codex CLI remotely
 - GitHub CLI OAuth for reading PRs and publishing `APPROVE` or `COMMENT`
 - Pinned OpenSpec CLI for strict validation of specification changes
 - Persistent Hermes state, credentials, sessions, skills, and review checkout
 - Review-only Slack channel and delegated-reviewer DMs
 - Optional Telegram or other Hermes gateway integrations
-- Loopback-only authenticated web dashboard
+- Loopback-only authenticated Hermes and Paseo web interfaces
 - No Docker socket, PR code execution, GitHub merging, `REQUEST_CHANGES`, or
-  Codex App-Server Runtime
+  directly exposed Codex app-server endpoint
 
 ChatGPT/Codex usage limits are account-managed and outside this repository.
 
@@ -39,6 +40,7 @@ Important runtime locations:
 |---|---|---|
 | Hermes Codex OAuth | `/opt/data/auth.json` | Never |
 | Standalone Codex CLI OAuth | `/opt/data/.codex/auth.json` | Never |
+| Paseo daemon identity, pairings, and projects | `/opt/data/.paseo` | Never |
 | GitHub CLI OAuth | `/opt/data/.config/gh/hosts.yml` | Never |
 | Native Git credential configuration | `/opt/data/.gitconfig` | Never |
 | Hermes configuration and integration secrets | `/opt/data/config.yaml`, `/opt/data/.env` | Never |
@@ -60,9 +62,9 @@ Create the ignored local configuration files:
 make init
 ```
 
-`make init` generates dashboard credentials in `.env` when the file is absent
-and copies `.review.env.example` to `.review.env`. It never overwrites existing
-files.
+`make init` copies the examples when the ignored files are absent and fills only
+missing generated credentials, including `PASEO_PASSWORD`. Existing values are
+never overwritten.
 
 Fill in these deployment-specific values in `.review.env`:
 
@@ -86,9 +88,9 @@ make sync-skills
 ```
 
 The derived image installs pinned standalone Codex (`0.149.1` by default), its
-Linux `bubblewrap` sandbox prerequisite, and OpenSpec (`1.6.0` by default).
-Override `CODEX_VERSION` or `OPENSPEC_VERSION` only after validating the new
-version.
+Linux `bubblewrap` sandbox prerequisite, OpenSpec (`1.6.0`), and Paseo (`0.5.2`).
+Override `CODEX_VERSION`, `OPENSPEC_VERSION`, or `PASEO_VERSION` only after
+validating the new version.
 
 Authenticate the ChatGPT/Codex subscription interactively:
 
@@ -138,6 +140,20 @@ make workspace-sync
 `workspace-sync` updates only remote-tracking refs. It does not pull, check out,
 reset, merge, or update working files.
 
+Register that monorepo with Paseo, verify its Codex provider, and pair the
+daemon with the hosted Paseo web app:
+
+```bash
+make paseo-register-workspace
+make paseo-provider-status
+make paseo-pair
+```
+
+Open the private pairing link printed by the last command. It enables Paseo's
+outbound, end-to-end encrypted relay connection; no public inbound port is
+needed. Treat the link and QR code as credentials and do not paste them into
+issues, logs, or chat channels.
+
 Configure Slack, Telegram, or another supported gateway when needed:
 
 ```bash
@@ -178,20 +194,24 @@ skill and configurable plugin without touching the volume:
 
 ```bash
 make init
+make build
 make sync-skills
 make apply-review-policy
 make restart
+make paseo-register-workspace
+make paseo-provider-status
+# Run make paseo-pair only if this installation is not paired yet.
 make verify
 ```
 
 The container is recreated, but `/opt/data` and all OAuth, sessions, pairings,
-configuration, and repository data remain in the named volume.
+configuration, Paseo state, and repository data remain in the named volume.
 
 ## Common commands
 
 ```bash
 make help                 # list targets
-make up                   # start Hermes
+make up                   # start Hermes and Paseo
 make down                 # stop without deleting data
 make restart              # recreate while preserving the volume
 make status               # container status
@@ -200,6 +220,11 @@ make chat                 # interactive terminal chat
 make codex                # open Codex in the configured monorepo root
 make auth-codex-cli       # authenticate the standalone Codex CLI
 make codex-cli-status     # verify standalone Codex authentication
+make paseo-status         # show Paseo daemon status
+make paseo-logs           # follow Paseo daemon logs
+make paseo-register-workspace # register the review monorepo
+make paseo-provider-status # verify Paseo can launch Codex
+make paseo-pair           # pair with the hosted Paseo web app
 make sync-skills          # copy the repository skill into Hermes state
 make workspace-status     # validate root and initialized submodules
 make workspace-sync       # safely fetch review refs
@@ -235,6 +260,35 @@ ssh -N -L 9119:127.0.0.1:9119 USER@VPS
 Then open the same loopback URL on the local computer. Dashboard credentials are
 in the ignored `.env` file.
 
+## Paseo web UI
+
+Paseo runs as a separate non-root Compose service while sharing `/opt/data` with
+Hermes. Codex sessions launched from Paseo therefore use the same standalone
+Codex login, GitHub CLI login, Git configuration, tools, and persistent
+monorepo. Hermes and Paseo still have independent process lifecycles.
+
+For the hosted web app, use `make paseo-pair` and open the private link it
+prints. This is the recommended way to reach a remote VPS because the daemon
+connects outbound through Paseo's encrypted relay.
+
+The bundled direct UI is also available on host loopback:
+
+```text
+http://127.0.0.1:PASEO_HOST_PORT
+```
+
+The default `PASEO_HOST_PORT` is `6767`; change it in `.env` if that port is
+already occupied. The UI requires the `PASEO_PASSWORD` stored in the same
+ignored file. On a VPS, reach it only through an SSH tunnel (replace both port
+values if you changed the default):
+
+```bash
+ssh -N -L 6767:127.0.0.1:6767 USER@VPS
+```
+
+Do not publish port 6767 directly. Use `make paseo-status` and
+`make paseo-provider-status` to diagnose daemon or Codex availability.
+
 ## Move the complete installation to a VPS
 
 The preferred migration preserves the complete volume. Stop the source first so
@@ -264,6 +318,8 @@ make volume-restore BACKUP_FILE=/absolute/secure/path/hermes-data.tgz
 make build
 make up
 make sync-skills
+make paseo-register-workspace
+make paseo-provider-status
 make verify
 ```
 
@@ -282,11 +338,12 @@ encrypted, access-controlled backup storage.
 
 - Keep this repository private because the skill contains organization-specific
   review policy, even though it contains no credentials.
-- Never commit `.env`, `.review.env`, `.codex`, `auth.json`, `hosts.yml`, volume
-  archives, sessions, or repository checkouts.
+- Never commit `.env`, `.review.env`, `.codex`, `.paseo`, `auth.json`,
+  `hosts.yml`, volume archives, sessions, or repository checkouts.
 - Keep `GITHUB_TOKEN` blank when using persisted `gh` OAuth; an environment token
   takes precedence.
-- Do not expose the dashboard directly to the internet.
+- Do not expose the Hermes dashboard or Paseo port directly to the internet.
+- Treat Paseo pairing URLs, QR codes, and `PASEO_PASSWORD` as credentials.
 - Do not mount `/var/run/docker.sock`.
 - Review all dependency/image upgrades before deployment. The current Dockerfile
   tracks the upstream Hermes `latest` image; pin a tested release or digest for
@@ -299,4 +356,9 @@ encrypted, access-controlled backup storage.
 - [Hermes Slack guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/slack)
 - [OpenAI Codex CLI](https://developers.openai.com/codex/cli/)
 - [OpenAI Codex authentication](https://developers.openai.com/codex/auth/)
+- [OpenAI Codex app-server](https://developers.openai.com/codex/app-server/)
+- [Paseo documentation](https://paseo.sh/docs)
+- [Paseo Docker deployment](https://paseo.sh/docs/docker)
+- [Paseo connectivity and relay](https://paseo.sh/docs/connectivity)
+- [Paseo security](https://paseo.sh/docs/security)
 - [GitHub CLI authentication](https://cli.github.com/manual/gh_auth_login)

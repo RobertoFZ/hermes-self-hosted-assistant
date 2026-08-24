@@ -1,9 +1,9 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help init bootstrap build up down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status auth-github gateway-setup sync-skills install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
+.PHONY: help init bootstrap build up down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status paseo-up paseo-status paseo-logs paseo-register-workspace paseo-pair paseo-provider-status auth-github gateway-setup sync-skills install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
 
 help: ## Show the available commands
-	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 build: ## Build the Hermes image with GitHub CLI
 	docker compose build --pull
@@ -12,7 +12,7 @@ init: ## Create ignored local configuration files without overwriting them
 	./scripts/bootstrap.sh
 
 bootstrap: init build up sync-skills ## Build and start a fresh installation
-	@printf '%s\n' "Next: make auth-codex, make select-model, make auth-github, and make clone-workspace"
+	@printf '%s\n' "Next: authenticate Hermes, Codex CLI, and GitHub; clone the workspace; then run make paseo-register-workspace and make paseo-pair"
 
 up: ## Start Hermes in the background
 	docker compose up -d
@@ -49,6 +49,28 @@ auth-codex-cli: ## Authenticate the standalone Codex CLI with device code
 
 codex-cli-status: ## Verify standalone Codex CLI authentication
 	docker compose exec -T --user hermes hermes codex login status
+
+paseo-up: ## Start the Paseo daemon and bundled web UI
+	docker compose up -d paseo
+
+paseo-status: ## Show Paseo daemon status
+	docker compose exec -T paseo curl --fail --silent --show-error \
+		http://127.0.0.1:6767/api/health
+
+paseo-logs: ## Follow Paseo daemon logs (Ctrl-C to stop)
+	docker compose logs --tail=100 -f paseo
+
+paseo-register-workspace: ## Register the configured monorepo with Paseo
+	docker compose exec -T --user hermes paseo /bin/sh -eu -c \
+		': "$${REVIEW_MONOREPO_ROOT:?set it in .review.env}"; paseo project create --host 127.0.0.1:6767 "$${REVIEW_MONOREPO_ROOT}"'
+
+paseo-pair: ## Pair this daemon with the hosted Paseo web app
+	docker compose exec -T --user hermes paseo \
+		paseo daemon pair --relay --home /opt/data/.paseo
+
+paseo-provider-status: ## Verify Paseo can launch the authenticated Codex CLI
+	docker compose exec -T --user hermes paseo \
+		paseo provider diagnostic --host 127.0.0.1:6767 --json codex
 
 auth-github: ## Authenticate GitHub CLI interactively as the Hermes user
 	docker compose exec --user hermes hermes \

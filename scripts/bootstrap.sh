@@ -32,13 +32,15 @@ set_if_empty() {
 umask 077
 if [ ! -f .env ]; then
   cp .env.example .env
-  set_if_empty .env HERMES_DASHBOARD_BASIC_AUTH_USERNAME admin
-  set_if_empty .env HERMES_DASHBOARD_BASIC_AUTH_PASSWORD "$(openssl rand -hex 24)"
-  set_if_empty .env HERMES_DASHBOARD_BASIC_AUTH_SECRET "$(openssl rand -hex 32)"
-  echo "Created .env with generated dashboard credentials."
+  echo "Created .env."
 else
   echo "Keeping existing .env."
 fi
+set_if_empty .env HERMES_DASHBOARD_BASIC_AUTH_USERNAME admin
+set_if_empty .env HERMES_DASHBOARD_BASIC_AUTH_PASSWORD "$(openssl rand -hex 24)"
+set_if_empty .env HERMES_DASHBOARD_BASIC_AUTH_SECRET "$(openssl rand -hex 32)"
+set_if_empty .env PASEO_PASSWORD "$(openssl rand -hex 32)"
+set_if_empty .env PASEO_HOST_PORT 6767
 chmod 600 .env
 
 if [ ! -f .review.env ]; then

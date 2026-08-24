@@ -7,6 +7,12 @@ DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 COMPOSE = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 VERIFY = (ROOT / "scripts" / "verify.sh").read_text(encoding="utf-8")
 MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
+BOOTSTRAP = (ROOT / "scripts" / "bootstrap.sh").read_text(encoding="utf-8")
+PASEO_ENTRYPOINT = (ROOT / "scripts" / "paseo-entrypoint.sh").read_text(
+    encoding="utf-8"
+)
+PASEO_CONFIG = (ROOT / "scripts" / "paseo-config.json").read_text(encoding="utf-8")
+DOCKERIGNORE = (ROOT / ".dockerignore").read_text(encoding="utf-8")
 
 
 class DeploymentToolingPolicyTests(unittest.TestCase):
@@ -38,6 +44,43 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
 
     def test_runtime_verification_checks_the_openspec_version(self):
         self.assertIn('test "$(openspec --version)" = "$OPENSPEC_VERSION"', VERIFY)
+
+    def test_paseo_is_pinned_in_the_image(self):
+        self.assertIn("ARG PASEO_VERSION=0.5.2", DOCKERFILE)
+        self.assertIn('@getpaseo/cli@${PASEO_VERSION}', DOCKERFILE)
+        self.assertIn('PASEO_VERSION: "${PASEO_VERSION:-0.5.2}"', COMPOSE)
+        self.assertIn("!scripts/paseo-entrypoint.sh", DOCKERIGNORE)
+        self.assertIn("!scripts/paseo-config.json", DOCKERIGNORE)
+
+    def test_paseo_service_is_loopback_only_and_shares_persistent_state(self):
+        self.assertIn('"127.0.0.1:${PASEO_HOST_PORT:-6767}:6767"', COMPOSE)
+        self.assertIn('PASEO_PASSWORD: "${PASEO_PASSWORD:?set it in .env}"', COMPOSE)
+        self.assertIn("- hermes-data:/opt/data", COMPOSE)
+        self.assertIn("--reuid=\"$HERMES_UID\"", PASEO_ENTRYPOINT)
+        self.assertNotIn("chown -R", PASEO_ENTRYPOINT)
+        self.assertIn('"dictation": {', PASEO_CONFIG)
+        self.assertIn('"voiceMode": {', PASEO_CONFIG)
+        self.assertGreaterEqual(PASEO_CONFIG.count('"enabled": false'), 2)
+
+    def test_bootstrap_backfills_a_paseo_password(self):
+        self.assertIn(
+            'set_if_empty .env PASEO_PASSWORD "$(openssl rand -hex 32)"',
+            BOOTSTRAP,
+        )
+
+    def test_paseo_make_targets_cover_initial_setup(self):
+        self.assertIn("paseo-register-workspace: ##", MAKEFILE)
+        self.assertIn("paseo daemon pair --relay", MAKEFILE)
+        self.assertIn("paseo provider diagnostic --host 127.0.0.1:6767", MAKEFILE)
+
+    def test_runtime_verification_checks_paseo_and_registered_workspace(self):
+        self.assertIn('test "$(paseo --version)" = "$PASEO_VERSION"', VERIFY)
+        self.assertIn("http://127.0.0.1:6767/api/health", VERIFY)
+        self.assertIn(
+            "paseo provider diagnostic --host 127.0.0.1:6767 --json codex",
+            VERIFY,
+        )
+        self.assertIn("paseo project ls --host 127.0.0.1:6767 --json", VERIFY)
 
 
 if __name__ == "__main__":

@@ -1,2 +1,6 @@
 **
 !Dockerfile
+!scripts/
+scripts/*
+!scripts/paseo-entrypoint.sh
+!scripts/paseo-config.json
