@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help init bootstrap build up down restart status logs chat auth-codex select-model auth-github gateway-setup sync-skills install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
+.PHONY: help init bootstrap build up down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status auth-github gateway-setup sync-skills install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
 
 help: ## Show the available commands
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -33,12 +33,22 @@ logs: ## Follow Hermes logs (Ctrl-C to stop)
 chat: ## Open an interactive Hermes terminal chat
 	docker compose exec hermes hermes chat
 
+codex: ## Open Codex CLI in the configured review monorepo root
+	docker compose exec --user hermes hermes /bin/sh -eu -c \
+		': "$${REVIEW_MONOREPO_ROOT:?set it in .review.env}"; cd "$$REVIEW_MONOREPO_ROOT"; exec codex'
+
 auth-codex: ## Authenticate a ChatGPT/Codex subscription interactively
 	docker compose exec hermes \
 		hermes auth add openai-codex --type oauth --no-browser
 
 select-model: ## Select the authenticated Hermes model interactively
 	docker compose exec hermes hermes model
+
+auth-codex-cli: ## Authenticate the standalone Codex CLI with device code
+	docker compose exec --user hermes hermes codex login --device-auth
+
+codex-cli-status: ## Verify standalone Codex CLI authentication
+	docker compose exec -T --user hermes hermes codex login status
 
 auth-github: ## Authenticate GitHub CLI interactively as the Hermes user
 	docker compose exec --user hermes hermes \

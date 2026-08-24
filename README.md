@@ -12,6 +12,7 @@ runtime files.
 ## Included boundaries
 
 - OpenAI Codex provider authenticated through ChatGPT OAuth
+- Pinned standalone Codex CLI with its own persistent ChatGPT OAuth
 - GitHub CLI OAuth for reading PRs and publishing `APPROVE` or `COMMENT`
 - Pinned OpenSpec CLI for strict validation of specification changes
 - Persistent Hermes state, credentials, sessions, skills, and review checkout
@@ -37,6 +38,7 @@ Important runtime locations:
 | Data | Container path | Committed? |
 |---|---|---|
 | Hermes Codex OAuth | `/opt/data/auth.json` | Never |
+| Standalone Codex CLI OAuth | `/opt/data/.codex/auth.json` | Never |
 | GitHub CLI OAuth | `/opt/data/.config/gh/hosts.yml` | Never |
 | Native Git credential configuration | `/opt/data/.gitconfig` | Never |
 | Hermes configuration and integration secrets | `/opt/data/config.yaml`, `/opt/data/.env` | Never |
@@ -44,8 +46,9 @@ Important runtime locations:
 | Review workspace | `/opt/data/repos/reserhub-revenue-full` | Never |
 | Canonical skill source | `skills/pr-reviewer` | Yes |
 
-The OAuth stores are independent. Codex CLI credentials from `~/.codex` are
-not mounted and are not required.
+The OAuth stores are independent. Hermes uses `/opt/data/auth.json`; the
+standalone Codex CLI uses `/opt/data/.codex/auth.json`. Authenticating one does
+not authenticate the other. Both locations live in the persistent named volume.
 
 ## First-time setup
 
@@ -82,9 +85,10 @@ make up
 make sync-skills
 ```
 
-The derived image installs the OpenSpec CLI version pinned by the Reserhub
-workspace (`1.6.0` by default). Override `OPENSPEC_VERSION` only when the
-workspace tooling policy moves to a different version.
+The derived image installs pinned standalone Codex (`0.149.1` by default), its
+Linux `bubblewrap` sandbox prerequisite, and OpenSpec (`1.6.0` by default).
+Override `CODEX_VERSION` or `OPENSPEC_VERSION` only after validating the new
+version.
 
 Authenticate the ChatGPT/Codex subscription interactively:
 
@@ -96,6 +100,17 @@ make select-model
 Open the device-code URL yourself and authenticate the intended ChatGPT account.
 Do not automate the browser step. Choose the OpenAI Codex subscription provider
 and one of the models offered by the live Hermes picker.
+
+Authenticate the standalone Codex CLI separately using its headless device-code
+flow, then verify its persisted session:
+
+```bash
+make auth-codex-cli
+make codex-cli-status
+```
+
+The CLI writes its secret-bearing session under `/opt/data/.codex`; do not copy
+that directory into the repository or expose it through a bind mount.
 
 Authenticate GitHub CLI as the same non-root user that runs Hermes:
 
@@ -182,6 +197,9 @@ make restart              # recreate while preserving the volume
 make status               # container status
 make logs                 # follow gateway logs
 make chat                 # interactive terminal chat
+make codex                # open Codex in the configured monorepo root
+make auth-codex-cli       # authenticate the standalone Codex CLI
+make codex-cli-status     # verify standalone Codex authentication
 make sync-skills          # copy the repository skill into Hermes state
 make workspace-status     # validate root and initialized submodules
 make workspace-sync       # safely fetch review refs
@@ -264,8 +282,8 @@ encrypted, access-controlled backup storage.
 
 - Keep this repository private because the skill contains organization-specific
   review policy, even though it contains no credentials.
-- Never commit `.env`, `.review.env`, `auth.json`, `hosts.yml`, volume archives,
-  sessions, or repository checkouts.
+- Never commit `.env`, `.review.env`, `.codex`, `auth.json`, `hosts.yml`, volume
+  archives, sessions, or repository checkouts.
 - Keep `GITHUB_TOKEN` blank when using persisted `gh` OAuth; an environment token
   takes precedence.
 - Do not expose the dashboard directly to the internet.
@@ -279,4 +297,6 @@ encrypted, access-controlled backup storage.
 - [Hermes providers](https://hermes-agent.nousresearch.com/docs/integrations/providers)
 - [Hermes Docker guide](https://hermes-agent.nousresearch.com/docs/user-guide/docker)
 - [Hermes Slack guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/slack)
+- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/)
+- [OpenAI Codex authentication](https://developers.openai.com/codex/auth/)
 - [GitHub CLI authentication](https://cli.github.com/manual/gh_auth_login)

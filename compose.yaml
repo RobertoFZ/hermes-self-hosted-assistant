@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
       args:
         HERMES_BASE_IMAGE: "${HERMES_BASE_IMAGE:-nousresearch/hermes-agent:latest}"
+        CODEX_VERSION: "${CODEX_VERSION:-0.149.1}"
         OPENSPEC_VERSION: "${OPENSPEC_VERSION:-1.6.0}"
     image: "${HERMES_LOCAL_IMAGE:-hermes-self-hosted-assistant:local}"
     restart: unless-stopped
