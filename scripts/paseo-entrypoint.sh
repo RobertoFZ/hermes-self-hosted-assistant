@@ -18,10 +18,19 @@ if [ ! -f "$PASEO_HOME/config.json" ]; then
     /usr/local/share/paseo/config.json "$PASEO_HOME/config.json"
 fi
 
+if [ ! -S /var/run/docker.sock ]; then
+  echo "The host Docker socket is not available at /var/run/docker.sock." >&2
+  exit 2
+fi
+DOCKER_SOCKET_GID="$(stat -c "%g" /var/run/docker.sock)"
+case "$DOCKER_SOCKET_GID" in
+  ''|*[!0-9]*) echo "The host Docker socket GID must be numeric." >&2; exit 2 ;;
+esac
+
 exec setpriv \
   --reuid="$HERMES_UID" \
   --regid="$HERMES_GID" \
-  --clear-groups \
+  --groups="$DOCKER_SOCKET_GID" \
   paseo daemon start \
     --foreground \
     --web-ui \

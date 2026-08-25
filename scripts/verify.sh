@@ -32,4 +32,12 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   paseo project ls --host 127.0.0.1:6767 --json | grep -F "$REVIEW_MONOREPO_ROOT" >/dev/null
 '
 
-echo "Hermes, Codex CLI, Paseo, GitHub, OpenSpec, skill, plugin, and workspace are ready."
+docker compose exec -T paseo /bin/sh -eu -c '
+  DOCKER_SOCKET_GID="$(stat -c "%g" /var/run/docker.sock)"
+  setpriv --reuid="$HERMES_UID" --regid="$HERMES_GID" --groups="$DOCKER_SOCKET_GID" \
+    docker info --format "{{.ServerVersion}}" >/dev/null
+  setpriv --reuid="$HERMES_UID" --regid="$HERMES_GID" --groups="$DOCKER_SOCKET_GID" \
+    docker compose version >/dev/null
+'
+
+echo "Hermes, Codex CLI, Paseo, host Docker, GitHub, OpenSpec, skill, plugin, and workspace are ready."

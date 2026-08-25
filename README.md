@@ -20,8 +20,9 @@ runtime files.
 - Review-only Slack channel and delegated-reviewer DMs
 - Optional Telegram or other Hermes gateway integrations
 - Loopback-only authenticated Hermes and Paseo web interfaces
-- No Docker socket, PR code execution, GitHub merging, `REQUEST_CHANGES`, or
-  directly exposed Codex app-server endpoint
+- Paseo-controlled host Docker for development and test workloads
+- No GitHub merging, `REQUEST_CHANGES`, or directly exposed Codex app-server
+  endpoint
 
 ChatGPT/Codex usage limits are account-managed and outside this repository.
 
@@ -274,6 +275,12 @@ Hermes. Codex sessions launched from Paseo therefore use the same standalone
 Codex login, GitHub CLI login, Git configuration, tools, and persistent
 monorepo. Hermes and Paseo still have independent process lifecycles.
 
+Paseo also mounts `/var/run/docker.sock`. Its non-root process receives the
+socket's numeric group and includes Docker Compose, so Codex sessions can build,
+start, inspect, and remove host containers for worktree development. Docker
+socket access is equivalent to host-administrator access; only trusted users may
+access or pair with this Paseo daemon.
+
 For the hosted web app, use `make paseo-pair` and open the private link it
 prints. This is the recommended way to reach a remote VPS because the daemon
 connects outbound through Paseo's encrypted relay.
@@ -351,7 +358,8 @@ encrypted, access-controlled backup storage.
   takes precedence.
 - Do not expose the Hermes dashboard or Paseo port directly to the internet.
 - Treat Paseo pairing URLs, QR codes, and `PASEO_PASSWORD` as credentials.
-- Do not mount `/var/run/docker.sock`.
+- Treat every user who can launch a Paseo session as a host administrator. The
+  mounted Docker socket can access host files, containers, volumes, and secrets.
 - Review all dependency/image upgrades before deployment. The current Dockerfile
   tracks the upstream Hermes `latest` image; pin a tested release or digest for
   production reproducibility.

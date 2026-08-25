@@ -11,10 +11,11 @@ ENV CODEX_VERSION="${CODEX_VERSION}" \
     PASEO_VERSION="${PASEO_VERSION}" \
     OPENSPEC_TELEMETRY=0
 
-# Install GitHub CLI from GitHub's official Debian package repository.
+# Install runtime prerequisites and Docker Compose, then install GitHub CLI from
+# GitHub's official Debian package repository.
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap ca-certificates curl util-linux \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates curl util-linux docker-compose \
     && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL \
         https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -24,6 +25,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends gh \
+    && docker compose version >/dev/null \
     && rm -rf /var/lib/apt/lists/*
 
 # Install a reproducible standalone Codex CLI for explicit agent delegation.

@@ -78,6 +78,16 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn('"voiceMode": {', PASEO_CONFIG)
         self.assertGreaterEqual(PASEO_CONFIG.count('"enabled": false'), 2)
 
+    def test_paseo_can_control_the_host_docker_daemon(self):
+        self.assertIn("docker-compose", DOCKERFILE)
+        self.assertIn("docker compose version", DOCKERFILE)
+        self.assertIn("source: /var/run/docker.sock", COMPOSE)
+        self.assertIn("target: /var/run/docker.sock", COMPOSE)
+        self.assertIn('stat -c "%g" /var/run/docker.sock', PASEO_ENTRYPOINT)
+        self.assertIn('--groups="$DOCKER_SOCKET_GID"', PASEO_ENTRYPOINT)
+        self.assertIn("docker info", VERIFY)
+        self.assertIn("docker compose version", VERIFY)
+
     def test_bootstrap_backfills_a_paseo_password(self):
         self.assertIn(
             'set_if_empty .env PASEO_PASSWORD "$(openssl rand -hex 32)"',
