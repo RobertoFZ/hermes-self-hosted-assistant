@@ -28,6 +28,7 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
 
   channel_prompts="$(python -c "import json,os; print(json.dumps({os.environ[\"SLACK_REVIEW_CHANNEL_ID\"]: \"Review only the pull request or all pull request URLs in the triggering message. Never discover additional PRs. Follow pr-reviewer and publish the review.\"}))")"
   channel_bindings="$(python -c "import json,os; print(json.dumps([{\"id\": os.environ[\"SLACK_REVIEW_CHANNEL_ID\"], \"skill\": \"pr-reviewer\"}]))")"
+  owner_ids="$(python -c "import json,os; print(json.dumps([value.strip() for value in os.environ[\"SLACK_REVIEW_OWNER_USER_IDS\"].split(\",\") if value.strip()]))")"
 
   hermes config set terminal.cwd "$REVIEW_MONOREPO_ROOT"
   hermes config set slack.require_mention true
@@ -37,6 +38,10 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   hermes config set slack.channel_skill_bindings "$channel_bindings"
   hermes config set slack.ignore_other_user_mentions false
   hermes config set slack.thread_require_mention false
+  hermes config set gateway.platforms.slack.extra.allow_admin_from "$owner_ids"
+  hermes config set gateway.platforms.slack.extra.user_allowed_commands "[]"
+  hermes config set gateway.platforms.slack.extra.group_allow_admin_from "$owner_ids"
+  hermes config set gateway.platforms.slack.extra.group_user_allowed_commands "[]"
   hermes config set display.platforms.slack.tool_progress off
   hermes config set display.platforms.slack.interim_assistant_messages false
   hermes config set display.platforms.slack.long_running_notifications false

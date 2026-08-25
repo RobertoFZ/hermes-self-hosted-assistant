@@ -16,6 +16,9 @@ DOCKERIGNORE = (ROOT / ".dockerignore").read_text(encoding="utf-8")
 UPDATE_CHECK = (ROOT / "scripts" / "check-tool-updates.sh").read_text(
     encoding="utf-8"
 )
+APPLY_REVIEW_POLICY = (ROOT / "scripts" / "apply-review-policy.sh").read_text(
+    encoding="utf-8"
+)
 
 
 class DeploymentToolingPolicyTests(unittest.TestCase):
@@ -94,6 +97,26 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
             VERIFY,
         )
         self.assertIn("paseo project ls --host 127.0.0.1:6767 --json", VERIFY)
+
+    def test_slack_policy_separates_owner_and_reviewer_slash_commands(self):
+        self.assertIn(
+            "gateway.platforms.slack.extra.allow_admin_from", APPLY_REVIEW_POLICY
+        )
+        self.assertIn(
+            "gateway.platforms.slack.extra.group_allow_admin_from",
+            APPLY_REVIEW_POLICY,
+        )
+        self.assertIn(
+            'gateway.platforms.slack.extra.user_allowed_commands "[]"',
+            APPLY_REVIEW_POLICY,
+        )
+        self.assertIn(
+            'gateway.platforms.slack.extra.group_user_allowed_commands "[]"',
+            APPLY_REVIEW_POLICY,
+        )
+        self.assertIn(
+            "Slack slash-command access policy is not applied", VERIFY
+        )
 
 
 if __name__ == "__main__":

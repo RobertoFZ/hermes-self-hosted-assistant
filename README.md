@@ -179,6 +179,12 @@ docker compose exec -T --user hermes hermes gh auth setup-git
 The Slack policy behaves as follows:
 
 - The configured owner keeps normal assistant access outside the review channel.
+- The configured owner is the only Slack slash-command administrator in both
+  direct messages and channels.
+- Delegated reviewers can use only Hermes' always-available `/help` and
+  `/whoami` slash commands. PR reviews remain explicit messages containing
+  approved GitHub PR URLs; the generic `/review` and direct `/pr-reviewer`
+  command surfaces are not delegated.
 - Delegated reviewers can submit review requests only in the configured channel
   or one-to-one DMs.
 - Delegated messages must contain one or more allowed GitHub PR URLs.

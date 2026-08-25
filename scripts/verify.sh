@@ -18,6 +18,7 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   test "$(openspec --version)" = "$OPENSPEC_VERSION"
   hermes skills list | grep -F pr-reviewer >/dev/null
   hermes plugins list | grep -F slack-pr-review-gate >/dev/null
+  python -c "import os,subprocess,sys,yaml; get=lambda key: yaml.safe_load(subprocess.check_output([\"hermes\", \"config\", \"get\", key], text=True)); expected={value.strip() for value in os.environ[\"SLACK_REVIEW_OWNER_USER_IDS\"].split(\",\") if value.strip()}; valid=set(get(\"gateway.platforms.slack.extra.allow_admin_from\") or []) == expected and get(\"gateway.platforms.slack.extra.user_allowed_commands\") == [] and set(get(\"gateway.platforms.slack.extra.group_allow_admin_from\") or []) == expected and get(\"gateway.platforms.slack.extra.group_user_allowed_commands\") == []; sys.exit(0 if valid else \"Slack slash-command access policy is not applied\")"
   /opt/data/skills/custom/pr-reviewer/scripts/prepare-workspace.sh --check
   test "$(hermes config get terminal.cwd)" = "$REVIEW_MONOREPO_ROOT"
 '
