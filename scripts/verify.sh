@@ -25,6 +25,14 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
 
 docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   : "${REVIEW_MONOREPO_ROOT:?set it in .review.env}"
+  test "$DOCKER_HOST" = "tcp://paseo-docker:2376"
+  test "$DOCKER_TLS_VERIFY" = "1"
+  test ! -S /var/run/docker.sock
+  docker info --format "{{.ServerVersion}}" >/dev/null
+  docker compose version >/dev/null
+  docker run --rm \
+    --mount "type=bind,src=$REVIEW_MONOREPO_ROOT,dst=/workspace,readonly" \
+    alpine:3.22 test -f /workspace/README.md
   test "$(paseo --version)" = "$PASEO_VERSION"
   codex login status
   curl --fail --silent --show-error http://127.0.0.1:6767/api/health >/dev/null
@@ -32,12 +40,4 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   paseo project ls --host 127.0.0.1:6767 --json | grep -F "$REVIEW_MONOREPO_ROOT" >/dev/null
 '
 
-docker compose exec -T paseo /bin/sh -eu -c '
-  DOCKER_SOCKET_GID="$(stat -c "%g" /var/run/docker.sock)"
-  setpriv --reuid="$HERMES_UID" --regid="$HERMES_GID" --groups="$DOCKER_SOCKET_GID" \
-    docker info --format "{{.ServerVersion}}" >/dev/null
-  setpriv --reuid="$HERMES_UID" --regid="$HERMES_GID" --groups="$DOCKER_SOCKET_GID" \
-    docker compose version >/dev/null
-'
-
-echo "Hermes, Codex CLI, Paseo, host Docker, GitHub, OpenSpec, skill, plugin, and workspace are ready."
+echo "Hermes, Codex CLI, Paseo, isolated Docker, GitHub, OpenSpec, skill, plugin, and workspace are ready."

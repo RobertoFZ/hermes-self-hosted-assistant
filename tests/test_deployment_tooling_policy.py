@@ -78,13 +78,21 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn('"voiceMode": {', PASEO_CONFIG)
         self.assertGreaterEqual(PASEO_CONFIG.count('"enabled": false'), 2)
 
-    def test_paseo_can_control_the_host_docker_daemon(self):
+    def test_paseo_uses_an_isolated_tls_docker_daemon(self):
         self.assertIn("docker-compose", DOCKERFILE)
         self.assertIn("docker compose version", DOCKERFILE)
-        self.assertIn("source: /var/run/docker.sock", COMPOSE)
-        self.assertIn("target: /var/run/docker.sock", COMPOSE)
-        self.assertIn('stat -c "%g" /var/run/docker.sock', PASEO_ENTRYPOINT)
-        self.assertIn('--groups="$DOCKER_SOCKET_GID"', PASEO_ENTRYPOINT)
+        self.assertIn('image: "${PASEO_DOCKER_IMAGE:-docker:29.7.2-dind}"', COMPOSE)
+        self.assertIn("privileged: true", COMPOSE)
+        self.assertIn('DOCKER_HOST: "tcp://paseo-docker:2376"', COMPOSE)
+        self.assertIn('DOCKER_TLS_VERIFY: "1"', COMPOSE)
+        self.assertIn("paseo-docker-data:/var/lib/docker", COMPOSE)
+        self.assertIn("paseo-docker-certs:/certs/client", COMPOSE)
+        self.assertNotIn("source: /var/run/docker.sock", COMPOSE)
+        self.assertIn('PASEO_DOCKER_CERT_SOURCE:=/run/paseo-docker-certs', PASEO_ENTRYPOINT)
+        self.assertIn('install -m 0400 -o "$HERMES_UID"', PASEO_ENTRYPOINT)
+        self.assertIn("--clear-groups", PASEO_ENTRYPOINT)
+        self.assertNotIn("DOCKER_SOCKET_GID", PASEO_ENTRYPOINT)
+        self.assertIn("test ! -S /var/run/docker.sock", VERIFY)
         self.assertIn("docker info", VERIFY)
         self.assertIn("docker compose version", VERIFY)
 

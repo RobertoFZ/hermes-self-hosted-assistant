@@ -20,7 +20,7 @@ runtime files.
 - Review-only Slack channel and delegated-reviewer DMs
 - Optional Telegram or other Hermes gateway integrations
 - Loopback-only authenticated Hermes and Paseo web interfaces
-- Paseo-controlled host Docker for development and test workloads
+- Paseo-controlled isolated Docker for development and test workloads
 - No GitHub merging, `REQUEST_CHANGES`, or directly exposed Codex app-server
   endpoint
 
@@ -32,6 +32,12 @@ Compose mounts the named volume `self-assistant-hermes-data` at `/opt/data`.
 The name is deliberately stable even when the repository is cloned into a new
 directory, so adopting this standardized checkout does not create a new empty
 Hermes profile.
+
+Paseo's nested Docker daemon uses two additional stable volumes:
+`self-assistant-paseo-docker-data` for its images, containers, and volumes, and
+`self-assistant-paseo-docker-certs` for mutual TLS credentials. The nested daemon
+also mounts `hermes-data` at `/opt/data`, allowing worktree bind mounts to resolve
+without exposing the VPS Docker socket.
 
 Never run `docker compose down -v` unless you intend to erase the installation.
 
@@ -275,11 +281,17 @@ Hermes. Codex sessions launched from Paseo therefore use the same standalone
 Codex login, GitHub CLI login, Git configuration, tools, and persistent
 monorepo. Hermes and Paseo still have independent process lifecycles.
 
-Paseo also mounts `/var/run/docker.sock`. Its non-root process receives the
-socket's numeric group and includes Docker Compose, so Codex sessions can build,
-start, inspect, and remove host containers for worktree development. Docker
-socket access is equivalent to host-administrator access; only trusted users may
-access or pair with this Paseo daemon.
+Paseo includes Docker Compose but does not mount `/var/run/docker.sock`. It
+connects over mutual TLS to a dedicated `paseo-docker` Docker-in-Docker sidecar.
+Codex sessions can build, start, inspect, and remove nested containers without
+seeing or modifying the VPS host daemon's containers, images, networks, or
+volumes. Both services mount `hermes-data` at `/opt/data`, so nested containers
+can bind-mount the persistent worktrees at their existing absolute paths.
+
+The sidecar is privileged because rootful Docker-in-Docker requires elevated
+kernel capabilities. This is a smaller trust boundary than exposing the host
+Docker API, but it is not equivalent to a separate VM. For the strongest
+isolation, run the development Docker daemon on a dedicated worker VM.
 
 For the hosted web app, use `make paseo-pair` and open the private link it
 prints. This is the recommended way to reach a remote VPS because the daemon
@@ -303,6 +315,30 @@ ssh -N -L 6767:127.0.0.1:6767 USER@VPS
 Do not publish port 6767 directly. Use `make paseo-status` and
 `make paseo-provider-status` to diagnose daemon or Codex availability.
 
+### Migrate an existing host-socket installation
+
+Preserve `hermes-data` and recreate the services without deleting volumes:
+
+```bash
+git pull --ff-only origin main
+make down
+make volume-backup BACKUP_FILE=/absolute/secure/path/hermes-data-before-dind.tgz
+make build
+docker compose up -d
+make paseo-status
+make paseo-provider-status
+docker compose exec -T --user hermes paseo docker info
+```
+
+Confirm that `docker info` reports `Name: paseo-docker` and that
+`/var/run/docker.sock` is absent inside Paseo. Existing Paseo sessions, Git
+commits, and worktrees remain in `hermes-data`; send the paused agent its resume
+message after these checks pass. Do not run `docker compose down -v`.
+
+To roll back, revert the migration commit, rebuild, and recreate Paseo without
+the `-v` flag. Keep the `paseo-docker-data` and `paseo-docker-certs` volumes until
+the migration has been stable long enough that rollback is no longer needed.
+
 ## Move the complete installation to a VPS
 
 The preferred migration preserves the complete volume. Stop the source first so
@@ -319,6 +355,11 @@ channel. Transfer these separately:
 1. This Git repository (after a remote is configured).
 2. The ignored `.env` and `.review.env`, or recreate them on the VPS.
 3. The encrypted/securely handled `hermes-data.tgz` archive.
+
+The backup intentionally excludes `paseo-docker-data` and
+`paseo-docker-certs`. Nested Docker images, containers, networks, and TLS
+certificates are disposable and are recreated on the destination. Git commits,
+Paseo sessions, and worktrees remain in `hermes-data` and are preserved.
 
 On the VPS, install Docker and Make, clone this repository, create the local
 configuration files, and restore before starting Hermes:
@@ -358,8 +399,10 @@ encrypted, access-controlled backup storage.
   takes precedence.
 - Do not expose the Hermes dashboard or Paseo port directly to the internet.
 - Treat Paseo pairing URLs, QR codes, and `PASEO_PASSWORD` as credentials.
-- Treat every user who can launch a Paseo session as a host administrator. The
-  mounted Docker socket can access host files, containers, volumes, and secrets.
+- Never mount `/var/run/docker.sock` into Paseo. Keep its Docker API on the
+  Compose-only TLS network and never publish port 2376 on the VPS.
+- Treat Paseo users as administrators of the nested Docker daemon and the shared
+  `/opt/data` workspace. They cannot control the host daemon through this setup.
 - Review all dependency/image upgrades before deployment. The current Dockerfile
   tracks the upstream Hermes `latest` image; pin a tested release or digest for
   production reproducibility.

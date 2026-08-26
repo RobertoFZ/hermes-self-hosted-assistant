@@ -43,6 +43,27 @@ services:
         target: /opt/global-skills/pr-reviewer
         read_only: true
 
+  paseo-docker:
+    image: "${PASEO_DOCKER_IMAGE:-docker:29.7.2-dind}"
+    hostname: paseo-docker
+    privileged: true
+    restart: unless-stopped
+    environment:
+      DOCKER_TLS_CERTDIR: "/certs"
+    volumes:
+      - paseo-docker-data:/var/lib/docker
+      - paseo-docker-certs:/certs/client
+      # The nested daemon resolves worktree bind mounts from this exact path.
+      - hermes-data:/opt/data
+    networks:
+      - paseo-docker
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
   paseo:
     <<: *hermes-runtime
     restart: unless-stopped
@@ -50,6 +71,8 @@ services:
     depends_on:
       hermes:
         condition: service_started
+      paseo-docker:
+        condition: service_healthy
     ports:
       - "127.0.0.1:${PASEO_HOST_PORT:-6767}:6767"
     env_file:
@@ -60,16 +83,19 @@ services:
       HERMES_GID: "${HERMES_GID:-10000}"
       PASEO_HOME: "/opt/data/.paseo"
       PASEO_PASSWORD: "${PASEO_PASSWORD:?set it in .env}"
+      PASEO_DOCKER_CERT_SOURCE: "/run/paseo-docker-certs"
+      DOCKER_HOST: "tcp://paseo-docker:2376"
+      DOCKER_TLS_VERIFY: "1"
+      DOCKER_CERT_PATH: "/opt/data/.paseo/docker-certs"
       GH_CONFIG_DIR: "/opt/data/.config/gh"
       GIT_CONFIG_GLOBAL: "/opt/data/.gitconfig"
       GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
     volumes:
       - hermes-data:/opt/data
-      # Paseo-launched Codex sessions intentionally have host-level Docker
-      # control. Anyone who can start a session must be trusted as a host admin.
-      - type: bind
-        source: /var/run/docker.sock
-        target: /var/run/docker.sock
+      - paseo-docker-certs:/run/paseo-docker-certs:ro
+    networks:
+      - default
+      - paseo-docker
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:6767/api/health"]
       interval: 10s
@@ -82,3 +108,11 @@ volumes:
     # Keep this default stable: it is the existing secret-bearing runtime
     # volume and is intentionally independent from the checkout directory.
     name: "${HERMES_DATA_VOLUME:-self-assistant-hermes-data}"
+  paseo-docker-data:
+    name: "${PASEO_DOCKER_DATA_VOLUME:-self-assistant-paseo-docker-data}"
+  paseo-docker-certs:
+    name: "${PASEO_DOCKER_CERTS_VOLUME:-self-assistant-paseo-docker-certs}"
+
+networks:
+  paseo-docker:
+    name: "${PASEO_DOCKER_NETWORK:-self-assistant-paseo-docker}"
