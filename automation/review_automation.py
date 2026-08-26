@@ -474,8 +474,20 @@ def mark_failed(db: sqlite3.Connection, run_id: str, error: str, result: Any = N
     db.commit()
 
 
-def review_one(db: sqlite3.Connection, url: str, login: str) -> dict[str, Any]:
+def review_one(
+    db: sqlite3.Connection,
+    url: str,
+    login: str,
+    *,
+    allow_self_review: bool = False,
+) -> dict[str, Any]:
     pr = load_pr(url)
+    if pr.author_login.lower() == login.lower() and not allow_self_review:
+        return {
+            "url": pr.url,
+            "status": "skipped_self_review_not_authorized",
+            "head_sha": pr.head_sha,
+        }
     if verified_run_exists(db, pr, login):
         return {"url": pr.url, "status": "skipped_verified", "head_sha": pr.head_sha}
 
@@ -535,7 +547,12 @@ def review_one(db: sqlite3.Connection, url: str, login: str) -> dict[str, Any]:
         return {"url": pr.url, "status": "failed", "head_sha": pr.head_sha, "error": str(exc)}
 
 
-def review_urls(urls: Iterable[str], db_path: str | None = None) -> dict[str, Any]:
+def review_urls(
+    urls: Iterable[str],
+    db_path: str | None = None,
+    *,
+    allow_self_review: bool = False,
+) -> dict[str, Any]:
     unique_urls = list(dict.fromkeys(url.strip() for url in urls if url.strip()))
     if not unique_urls:
         raise AutomationError("at least one exact GitHub pull request URL is required")
@@ -543,7 +560,10 @@ def review_urls(urls: Iterable[str], db_path: str | None = None) -> dict[str, An
         parse_pr_url(url)
     login = reviewer_login()
     with connect_db(db_path) as db:
-        results = [review_one(db, url, login) for url in unique_urls]
+        results = [
+            review_one(db, url, login, allow_self_review=allow_self_review)
+            for url in unique_urls
+        ]
     return {
         "reviewer": login,
         "requested": len(unique_urls),
@@ -628,6 +648,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init", help="initialize or migrate the database")
     review = subparsers.add_parser("review", help="delegate and persist exact PR reviews")
+    review.add_argument(
+        "--allow-self-review",
+        action="store_true",
+        help="allow PRs authored by the authenticated GitHub user",
+    )
     review.add_argument("urls", nargs="+")
     digest = subparsers.add_parser("digest-source", help="emit verified review data for a digest")
     digest.add_argument("--hours", type=int, default=24)
@@ -643,7 +668,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 version = db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
             emit({"status": "ready", "schema_version": version, "database": args.db or os.environ.get("REVIEW_HISTORY_DB", DEFAULT_DB)})
         elif args.command == "review":
-            emit(review_urls(args.urls, args.db))
+            emit(
+                review_urls(
+                    args.urls,
+                    args.db,
+                    allow_self_review=args.allow_self_review,
+                )
+            )
         elif args.command == "digest-source":
             emit(digest_source(args.db, hours=args.hours, timezone_name=args.timezone))
         return 0

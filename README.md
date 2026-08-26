@@ -232,6 +232,10 @@ The Slack policy behaves as follows:
 - Delegated reviewers can submit review requests only in the configured channel
   or one-to-one DMs.
 - Delegated messages must contain one or more allowed GitHub PR URLs.
+- Allowed PR URLs trigger reviews regardless of surrounding wording. A PR
+  authored by the authenticated GitHub reviewer is the exception: it is
+  reviewed only when a configured Slack owner mentions the Hermes bot in the
+  same message. Other PRs in a mixed message continue normally.
 - Unsupported URLs or unrelated instructions are discarded before inference.
 - Accepted requests get one immediate threaded acknowledgement; tool progress
   remains hidden until Hermes posts the result.

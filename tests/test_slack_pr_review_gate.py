@@ -30,7 +30,7 @@ def load_plugin():
     return module
 
 
-def event(user_id: str, chat_id: str, text: str):
+def event(user_id: str, chat_id: str, text: str, *, raw_message=None):
     source = SimpleNamespace(
         platform="slack",
         user_id=user_id,
@@ -38,7 +38,20 @@ def event(user_id: str, chat_id: str, text: str):
         scope_id="T_TEST",
         thread_id="",
     )
-    return SimpleNamespace(source=source, text=text, message_id="1")
+    return SimpleNamespace(
+        source=source,
+        text=text,
+        message_id="1",
+        raw_message=raw_message,
+    )
+
+
+def gateway(bot_user_id: str = "U_BOT"):
+    adapter = SimpleNamespace(
+        _bot_user_id=bot_user_id,
+        _team_bot_user_ids={"T_TEST": bot_user_id},
+    )
+    return SimpleNamespace(adapters={"slack": adapter})
 
 
 class SlackReviewPolicyTests(unittest.TestCase):
@@ -67,6 +80,59 @@ class SlackReviewPolicyTests(unittest.TestCase):
         self.assertIn("codex-pr-review", result["text"])
         self.assertIn("https://github.com/acme/api/pull/42", result["text"])
         self.assertNotIn("please do this", result["text"])
+        self.assertIn("Self-review authorization: denied", result["text"])
+
+    def test_owner_bot_mention_authorizes_self_review(self):
+        with patch.object(self.plugin, "_schedule_review_started"):
+            result = self.plugin._review_only_policy(
+                event(
+                    "U_OWNER",
+                    "C_REVIEW",
+                    "<@U_BOT> les comparto estos PRs para que revisen "
+                    "https://github.com/acme/api/pull/42",
+                ),
+                gateway=gateway(),
+            )
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn("Self-review authorization: allowed", result["text"])
+        self.assertIn("--allow-self-review", result["text"])
+
+    def test_owner_without_bot_mention_does_not_authorize_self_review(self):
+        result = self.plugin._review_only_policy(
+            event(
+                "U_OWNER",
+                "C_REVIEW",
+                "Les comparto estos PRs para que revisen "
+                "https://github.com/acme/api/pull/42",
+            )
+        )
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn("Self-review authorization: denied", result["text"])
+
+    def test_slack_app_mention_event_authorizes_owner_without_configured_id(self):
+        result = self.plugin._review_only_policy(
+            event(
+                "U_OWNER",
+                "C_REVIEW",
+                "Hermes https://github.com/acme/api/pull/42",
+                raw_message={"type": "app_mention"},
+            )
+        )
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn("Self-review authorization: allowed", result["text"])
+
+    def test_reviewer_cannot_authorize_self_review_by_mentioning_bot(self):
+        with patch.object(self.plugin, "_schedule_review_started"):
+            result = self.plugin._review_only_policy(
+                event(
+                    "U_REVIEWER",
+                    "C_REVIEW",
+                    "<@U_BOT> https://github.com/acme/api/pull/42",
+                ),
+                gateway=gateway(),
+            )
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn("Self-review authorization: denied", result["text"])
 
     def test_reviewer_non_review_dm_is_rejected(self):
         result = self.plugin._review_only_policy(

@@ -111,6 +111,66 @@ class ReviewAutomationTests(unittest.TestCase):
             digest = automation.digest_source(str(database))
             self.assertEqual(digest["review_count"], 0)
 
+    def test_self_review_requires_explicit_automation_authorization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/9",
+                repo="acme/api",
+                number=9,
+                title="Owner change",
+                body="",
+                head_sha="c" * 40,
+                base_ref="main",
+                author_login="review-bot",
+            )
+            with automation.connect_db(database) as db, patch.object(
+                automation, "load_pr", return_value=pr
+            ), patch.object(automation, "invoke_codex") as invoke_codex:
+                result = automation.review_one(db, pr.url, "review-bot")
+
+            self.assertEqual(
+                result["status"], "skipped_self_review_not_authorized"
+            )
+            invoke_codex.assert_not_called()
+
+    def test_self_review_can_be_authorized_by_trusted_caller(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/10",
+                repo="acme/api",
+                number=10,
+                title="Owner change",
+                body="",
+                head_sha="d" * 40,
+                base_ref="main",
+                author_login="review-bot",
+            )
+            with automation.connect_db(database) as db, patch.object(
+                automation, "load_pr", return_value=pr
+            ), patch.object(
+                automation,
+                "github_publications",
+                side_effect=[
+                    {"reviews": [], "comments": []},
+                    {"reviews": [], "comments": []},
+                ],
+            ), patch.object(
+                automation,
+                "invoke_codex",
+                side_effect=automation.AutomationError("delegated test stop"),
+            ) as invoke_codex:
+                result = automation.review_one(
+                    db,
+                    pr.url,
+                    "review-bot",
+                    allow_self_review=True,
+                )
+
+            self.assertEqual(result["status"], "failed")
+            invoke_codex.assert_called_once_with(pr)
+
 
 if __name__ == "__main__":
     unittest.main()
