@@ -1,0 +1,3 @@
+interface:
+  display_name: "Review Digest"
+  short_description: "Summarize verified daily PR reviews for Slack"

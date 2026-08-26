@@ -64,6 +64,7 @@ class SlackReviewPolicyTests(unittest.TestCase):
             )
         )
         self.assertEqual(result["action"], "rewrite")
+        self.assertIn("codex-pr-review", result["text"])
         self.assertIn("https://github.com/acme/api/pull/42", result["text"])
         self.assertNotIn("please do this", result["text"])
 

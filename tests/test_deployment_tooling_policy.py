@@ -19,6 +19,8 @@ UPDATE_CHECK = (ROOT / "scripts" / "check-tool-updates.sh").read_text(
 APPLY_REVIEW_POLICY = (ROOT / "scripts" / "apply-review-policy.sh").read_text(
     encoding="utf-8"
 )
+SYNC_SKILLS = (ROOT / "scripts" / "sync-skills.sh").read_text(encoding="utf-8")
+CRON_CONFIG = (ROOT / "config" / "crons.json").read_text(encoding="utf-8")
 
 
 class DeploymentToolingPolicyTests(unittest.TestCase):
@@ -77,6 +79,29 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn('"dictation": {', PASEO_CONFIG)
         self.assertIn('"voiceMode": {', PASEO_CONFIG)
         self.assertGreaterEqual(PASEO_CONFIG.count('"enabled": false'), 2)
+
+    def test_pr_reviewer_is_codex_only_and_hermes_has_orchestration_skills(self):
+        self.assertIn("target: /opt/data/.agents/skills/pr-reviewer", COMPOSE)
+        self.assertNotIn("target: /opt/global-skills/pr-reviewer", COMPOSE)
+        self.assertIn("target: /opt/global-skills/codex-pr-review", COMPOSE)
+        self.assertIn("target: /opt/global-skills/review-digest", COMPOSE)
+        self.assertIn("/opt/data/skills/custom/pr-reviewer", SYNC_SKILLS)
+        self.assertIn('\\"skill\\": \\"codex-pr-review\\"', APPLY_REVIEW_POLICY)
+
+    def test_daily_digest_uses_single_repository_config_at_1700_mexico_time(self):
+        self.assertIn('"schedule": "0 17 * * *"', CRON_CONFIG)
+        self.assertIn('"timezone": "${TZ}"', CRON_CONFIG)
+        self.assertIn("America/Mexico_City", (ROOT / ".review.env.example").read_text(encoding="utf-8"))
+        self.assertIn("sync-crons: ##", MAKEFILE)
+        self.assertIn("/opt/review-config/crons.json", COMPOSE)
+
+    def test_linear_context_uses_read_only_mcp_oauth(self):
+        linear_setup = (ROOT / "scripts" / "auth-linear.sh").read_text(encoding="utf-8")
+        self.assertIn("https://mcp.linear.app/mcp/readonly", linear_setup)
+        self.assertIn("mcp_oauth_callback_port=5555", linear_setup)
+        self.assertIn('127.0.0.1:${LINEAR_OAUTH_CALLBACK_HOST_PORT:-5555}:5555', COMPOSE)
+        self.assertNotIn("LINEAR_API_KEY", COMPOSE)
+        self.assertIn('grep -F "Not logged in"', VERIFY)
 
     def test_paseo_uses_an_isolated_tls_docker_daemon(self):
         self.assertIn("docker-compose", DOCKERFILE)

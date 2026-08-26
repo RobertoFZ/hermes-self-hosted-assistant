@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help init bootstrap build up down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status check-tool-updates paseo-up paseo-status paseo-logs paseo-register-workspace paseo-pair paseo-provider-status auth-github gateway-setup sync-skills install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
+.PHONY: help init bootstrap build up down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status auth-linear check-tool-updates paseo-up paseo-status paseo-logs paseo-register-workspace paseo-pair paseo-provider-status auth-github gateway-setup sync-skills sync-crons cron-status digest-preview review-history-init install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
 
 help: ## Show the available commands
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -11,7 +11,7 @@ build: ## Build the Hermes image with GitHub CLI
 init: ## Create ignored local configuration files without overwriting them
 	./scripts/bootstrap.sh
 
-bootstrap: init build up sync-skills ## Build and start a fresh installation
+bootstrap: init build up sync-skills sync-crons ## Build and start a fresh installation
 	@printf '%s\n' "Next: authenticate Hermes, Codex CLI, and GitHub; clone the workspace; then run make paseo-register-workspace and make paseo-pair"
 
 up: ## Start Hermes in the background
@@ -50,6 +50,9 @@ auth-codex-cli: ## Authenticate the standalone Codex CLI with device code
 codex-cli-status: ## Verify standalone Codex CLI authentication
 	docker compose exec -T --user hermes hermes codex login status
 
+auth-linear: ## Authenticate Codex to the read-only Linear MCP endpoint
+	./scripts/auth-linear.sh
+
 check-tool-updates: ## Check npm for newer Codex and Paseo releases
 	./scripts/check-tool-updates.sh
 
@@ -83,8 +86,22 @@ auth-github: ## Authenticate GitHub CLI interactively as the Hermes user
 gateway-setup: ## Configure Slack, Telegram, or another messaging platform
 	docker compose exec hermes hermes gateway setup
 
-sync-skills: ## Sync the repository-owned pr-reviewer skill into Hermes
+sync-skills: ## Sync Hermes orchestration and digest skills
 	./scripts/sync-skills.sh
+
+sync-crons: ## Reconcile Hermes jobs from the single config/crons.json file
+	./scripts/sync-crons.sh
+
+cron-status: ## List the active Hermes cron jobs
+	docker compose exec -T --user hermes hermes hermes cron list
+
+review-history-init: ## Initialize or migrate the persisted review database
+	docker compose exec -T --user hermes hermes \
+		python3 /opt/review-automation/review_automation.py init
+
+digest-preview: ## Show the verified previous-24-hours digest source as JSON
+	docker compose exec -T --user hermes hermes /bin/sh -eu -c \
+		'python3 /opt/review-automation/review_automation.py digest-source --hours 24 --timezone "$${TZ:-America/Mexico_City}"'
 
 install-global-skill: ## Link the repository skill into the local Codex skill directory
 	./scripts/install-global-skill.sh
@@ -101,11 +118,11 @@ github-status: ## Verify GitHub CLI authentication without printing the token
 
 workspace-status: ## Verify the review monorepo and initialized submodules
 	docker compose exec -T --user hermes hermes \
-		/opt/data/skills/custom/pr-reviewer/scripts/prepare-workspace.sh --check
+		/opt/review-workspace/prepare-workspace.sh --check
 
 workspace-sync: ## Safely refresh review refs without changing checked-out files
 	docker compose exec -T --user hermes hermes \
-		/opt/data/skills/custom/pr-reviewer/scripts/prepare-workspace.sh --fetch
+		/opt/review-workspace/prepare-workspace.sh --fetch
 
 verify: ## Verify provider, GitHub, skill, plugin, and workspace configuration
 	./scripts/verify.sh

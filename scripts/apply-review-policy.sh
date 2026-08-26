@@ -26,8 +26,8 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
 
   python -c "import os; from hermes_cli.config import save_env_value; save_env_value(\"SLACK_ALLOWED_USERS\", os.environ[\"SLACK_ALLOWED_USERS\"])"
 
-  channel_prompts="$(python -c "import json,os; print(json.dumps({os.environ[\"SLACK_REVIEW_CHANNEL_ID\"]: \"Review only the pull request or all pull request URLs in the triggering message. Never discover additional PRs. Follow pr-reviewer and publish the review.\"}))")"
-  channel_bindings="$(python -c "import json,os; print(json.dumps([{\"id\": os.environ[\"SLACK_REVIEW_CHANNEL_ID\"], \"skill\": \"pr-reviewer\"}]))")"
+  channel_prompts="$(python -c "import json,os; print(json.dumps({os.environ[\"SLACK_REVIEW_CHANNEL_ID\"]: \"Delegate only the exact pull request URLs in the triggering message through codex-pr-review. Never discover additional PRs. Report only GitHub-verified results.\"}))")"
+  channel_bindings="$(python -c "import json,os; print(json.dumps([{\"id\": os.environ[\"SLACK_REVIEW_CHANNEL_ID\"], \"skill\": \"codex-pr-review\"}]))")"
   owner_ids="$(python -c "import json,os; print(json.dumps([value.strip() for value in os.environ[\"SLACK_REVIEW_OWNER_USER_IDS\"].split(\",\") if value.strip()]))")"
 
   hermes config set terminal.cwd "$REVIEW_MONOREPO_ROOT"

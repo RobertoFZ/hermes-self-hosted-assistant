@@ -32,6 +32,12 @@ services:
       GH_CONFIG_DIR: "/opt/data/.config/gh"
       GIT_CONFIG_GLOBAL: "/opt/data/.gitconfig"
       GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+      PASEO_PASSWORD: "${PASEO_PASSWORD:?set it in .env}"
+      PASEO_HOST: "paseo:6767"
+      REVIEW_HISTORY_DB: "/opt/data/review-history/reviews.sqlite3"
+      REVIEW_RESULT_SCHEMA: "/opt/review-automation/review-result.schema.json"
+      REVIEW_CRON_CONFIG: "/opt/review-config/crons.json"
+      REVIEW_CRON_STATE: "/opt/data/cron/repository-managed-jobs.json"
     volumes:
       - hermes-data:/opt/data
       - type: bind
@@ -39,8 +45,28 @@ services:
         target: /opt/data/plugins/slack-pr-review-gate
         read_only: true
       - type: bind
-        source: ./skills/pr-reviewer
-        target: /opt/global-skills/pr-reviewer
+        source: ./skills/codex-pr-review
+        target: /opt/global-skills/codex-pr-review
+        read_only: true
+      - type: bind
+        source: ./skills/review-digest
+        target: /opt/global-skills/review-digest
+        read_only: true
+      - type: bind
+        source: ./automation
+        target: /opt/review-automation
+        read_only: true
+      - type: bind
+        source: ./config
+        target: /opt/review-config
+        read_only: true
+      - type: bind
+        source: ./scripts
+        target: /opt/review-tooling
+        read_only: true
+      - type: bind
+        source: ./skills/pr-reviewer/scripts/prepare-workspace.sh
+        target: /opt/review-workspace/prepare-workspace.sh
         read_only: true
 
   paseo-docker:
@@ -75,6 +101,7 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:${PASEO_HOST_PORT:-6767}:6767"
+      - "127.0.0.1:${LINEAR_OAUTH_CALLBACK_HOST_PORT:-5555}:5555"
     env_file:
       - .review.env
     environment:
@@ -93,6 +120,10 @@ services:
     volumes:
       - hermes-data:/opt/data
       - paseo-docker-certs:/run/paseo-docker-certs:ro
+      - type: bind
+        source: ./skills/pr-reviewer
+        target: /opt/data/.agents/skills/pr-reviewer
+        read_only: true
     networks:
       - default
       - paseo-docker

@@ -5,16 +5,21 @@ review assistant. It uses the Hermes agent runtime with the `openai-codex`
 provider and interactive ChatGPT/Codex OAuth; it does not require an
 `OPENAI_API_KEY`.
 
-The repository owns the `pr-reviewer` skill and Slack review-only policy. Every
-installation supplies its own credentials and Slack identifiers through ignored
-runtime files.
+The repository owns the Codex `pr-reviewer`, two Hermes orchestration skills,
+the persisted review-history schema, the daily digest definition, and the Slack
+review-only policy. Every installation supplies its own credentials and Slack
+identifiers through ignored runtime files.
 
 ## Included boundaries
 
 - OpenAI Codex provider authenticated through ChatGPT OAuth
 - Pinned standalone Codex CLI with its own persistent ChatGPT OAuth
 - Pinned Paseo daemon and web UI for using that Codex CLI remotely
+- Hermes-to-Paseo delegation of exact PR review requests
 - GitHub CLI OAuth for reading PRs and publishing `APPROVE` or `COMMENT`
+- SQLite history containing only Hermes-initiated, GitHub-verified reviews
+- Linear issue snapshots and normalized findings for later analysis
+- Daily Slack DM digest at 17:00 in `America/Mexico_City`
 - Pinned OpenSpec CLI for strict validation of specification changes
 - Persistent Hermes state, credentials, sessions, skills, and review checkout
 - Review-only Slack channel and delegated-reviewer DMs
@@ -53,7 +58,11 @@ Important runtime locations:
 | Hermes configuration and integration secrets | `/opt/data/config.yaml`, `/opt/data/.env` | Never |
 | Sessions and pairings | `/opt/data/sessions` and Hermes runtime state | Never |
 | Review workspace | `/opt/data/repos/reserhub-revenue-full` | Never |
-| Canonical skill source | `skills/pr-reviewer` | Yes |
+| Verified review history | `/opt/data/review-history/reviews.sqlite3` | Never |
+| Managed Hermes cron IDs | `/opt/data/cron/repository-managed-jobs.json` | Never |
+| Codex review skill | `skills/pr-reviewer` | Yes |
+| Hermes orchestration skills | `skills/codex-pr-review`, `skills/review-digest` | Yes |
+| Cron source of truth | `config/crons.json` | Yes |
 
 The OAuth stores are independent. Hermes uses `/opt/data/auth.json`; the
 standalone Codex CLI uses `/opt/data/.codex/auth.json`. Authenticating one does
@@ -80,7 +89,12 @@ SLACK_ALLOWED_USERS=OWNER_ID,REVIEWER_ID
 SLACK_REVIEW_OWNER_USER_IDS=OWNER_ID
 SLACK_REVIEWER_USER_IDS=REVIEWER_ID
 SLACK_REVIEW_CHANNEL_ID=CHANNEL_ID
+SLACK_REVIEW_DIGEST_USER_ID=OWNER_ID
+TZ=America/Mexico_City
 ```
+
+`SLACK_REVIEW_DIGEST_USER_ID` may be left blank when exactly one owner is
+configured; cron synchronization uses that owner as the digest recipient.
 
 The repository and submodule defaults are already declared in the example.
 `SLACK_ALLOWED_USERS` must contain the owner plus every delegated reviewer
@@ -92,6 +106,7 @@ Build and start:
 make build
 make up
 make sync-skills
+make sync-crons
 ```
 
 The derived image installs pinned standalone Codex (`0.149.1` by default), its
@@ -120,6 +135,27 @@ make codex-cli-status
 
 The CLI writes its secret-bearing session under `/opt/data/.codex`; do not copy
 that directory into the repository or expose it through a bind mount.
+
+Linear authentication is intentionally completed after deployment on the VPS.
+The repository exposes Codex's fixed OAuth callback only on VPS loopback. From
+your computer, open an SSH tunnel and keep it running:
+
+```bash
+ssh -N -L 5555:127.0.0.1:5555 USER@VPS
+```
+
+In a second VPS shell, start the one-time OAuth flow, then open the printed URL
+in your local browser:
+
+```bash
+make auth-linear
+```
+
+Codex registers the official read-only Linear MCP endpoint and persists its
+OAuth credentials under `/opt/data/.codex`. No Linear API key is needed. If the
+host port `5555` is occupied, change `LINEAR_OAUTH_CALLBACK_HOST_PORT` in `.env`
+and forward that host port to local port `5555`. Reviews requested before OAuth
+is completed still run, but their Linear snapshot is marked unavailable.
 
 Authenticate GitHub CLI as the same non-root user that runs Hermes:
 
@@ -173,6 +209,7 @@ review-only policy and restart:
 ```bash
 make apply-review-policy
 make restart
+make sync-crons
 make verify
 ```
 
@@ -199,6 +236,68 @@ The Slack policy behaves as follows:
 - Accepted requests get one immediate threaded acknowledgement; tool progress
   remains hidden until Hermes posts the result.
 
+## Review delegation and persistence
+
+Hermes does not discover or execute `pr-reviewer`. The skill is mounted only in
+Codex's user skill directory inside the Paseo service. The path for a Slack
+review is:
+
+```text
+Slack request
+  -> Hermes codex-pr-review
+  -> deterministic review automation
+  -> Paseo run
+  -> Codex $pr-reviewer
+  -> GitHub APPROVE or COMMENT
+  -> GitHub reconciliation
+  -> SQLite verified history
+```
+
+This leaves the existing `pr-reviewer` instructions unchanged. You can still
+invoke `$pr-reviewer` manually in Codex for a local, pre-PR review; it is not
+automatically attached to `ship` or PR creation. Those direct Codex reviews are
+not imported into the Hermes digest.
+
+For a Hermes request, the automation validates the exact URL and repository
+allowlist, records the PR head SHA, checks for an existing current-head review,
+launches one structured Codex run per PR, and then checks GitHub again. A Codex
+response is persisted as successful only when a new review or inline comment by
+the authenticated reviewer exists on the same head SHA. Retries are idempotent.
+
+Each successful record includes the review result and summary, normalized
+findings and severities, a snapshot of the related Linear issue when available,
+and the verified GitHub publication IDs. Preview the raw digest input with:
+
+```bash
+make digest-preview
+```
+
+The SQLite database is part of `hermes-data`, so the existing volume backup and
+restore commands include it automatically.
+
+## Repository-managed cron jobs
+
+All schedules live in the single committed file
+[`config/crons.json`](config/crons.json). It stores the cron expression together
+with the Hermes skill, prompt, delivery target, and working directory. The
+default daily digest is `0 17 * * *`; with `TZ=America/Mexico_City`, it runs at
+17:00 Mexico City local time throughout the year.
+
+After editing the file or changing its environment variables, recreate Hermes
+when the timezone changed and reconcile the definitions:
+
+```bash
+make restart       # required only after changing TZ
+make sync-crons
+make cron-status
+```
+
+Synchronization uses `hermes cron create/edit/remove`; it never edits Hermes'
+internal jobs file. Its small state map tracks only jobs owned by this
+repository, so unrelated cron jobs created by a VPS operator are preserved.
+Removing a job from `config/crons.json` removes only its previously managed
+Hermes counterpart on the next synchronization.
+
 ## Existing installations
 
 This repository keeps the existing `self-assistant-hermes-data` volume name.
@@ -208,9 +307,11 @@ skill and configurable plugin without touching the volume:
 ```bash
 make init
 make build
+make up
 make sync-skills
 make apply-review-policy
 make restart
+make sync-crons
 make paseo-register-workspace
 make paseo-provider-status
 # Run make paseo-pair only if this installation is not paired yet.
@@ -233,13 +334,18 @@ make chat                 # interactive terminal chat
 make codex                # open Codex in the configured monorepo root
 make auth-codex-cli       # authenticate the standalone Codex CLI
 make codex-cli-status     # verify standalone Codex authentication
+make auth-linear          # one-time read-only Linear MCP OAuth login
 make check-tool-updates   # check npm for newer Codex and Paseo releases
 make paseo-status         # show Paseo daemon status
 make paseo-logs           # follow Paseo daemon logs
 make paseo-register-workspace # register the review monorepo
 make paseo-provider-status # verify Paseo can launch Codex
 make paseo-pair           # pair with the hosted Paseo web app
-make sync-skills          # copy the repository skill into Hermes state
+make sync-skills          # copy Hermes orchestration skills into persistent state
+make sync-crons           # reconcile jobs from config/crons.json
+make cron-status          # list active Hermes cron jobs
+make digest-preview       # inspect verified 24-hour digest data
+make review-history-init  # migrate the SQLite review history
 make workspace-status     # validate root and initialized submodules
 make workspace-sync       # safely fetch review refs
 make apply-review-policy  # persist Slack review-only configuration
@@ -373,6 +479,7 @@ make volume-restore BACKUP_FILE=/absolute/secure/path/hermes-data.tgz
 make build
 make up
 make sync-skills
+make sync-crons
 make paseo-register-workspace
 make paseo-provider-status
 make verify
@@ -419,4 +526,5 @@ encrypted, access-controlled backup storage.
 - [Paseo Docker deployment](https://paseo.sh/docs/docker)
 - [Paseo connectivity and relay](https://paseo.sh/docs/connectivity)
 - [Paseo security](https://paseo.sh/docs/security)
+- [Linear MCP server](https://linear.app/docs/mcp)
 - [GitHub CLI authentication](https://cli.github.com/manual/gh_auth_login)

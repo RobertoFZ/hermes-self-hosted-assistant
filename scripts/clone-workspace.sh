@@ -4,7 +4,7 @@ set -eu
 docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   repository="${REVIEW_MONOREPO_REPOSITORY:?set it in .review.env}"
   root="${REVIEW_MONOREPO_ROOT:?set it in .review.env}"
-  helper=/opt/data/skills/custom/pr-reviewer/scripts/prepare-workspace.sh
+  helper=/opt/review-workspace/prepare-workspace.sh
 
   if [ -e "$root" ]; then
     "$helper" --check --root "$root"

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "timezone": "${TZ}",
+  "jobs": [
+    {
+      "key": "daily-review-digest",
+      "name": "Daily PR review digest",
+      "schedule": "0 17 * * *",
+      "prompt": "Use the review-digest skill to prepare today's verified PR review digest for the previous 24 hours. Include product context from Linear and important review insights. If no verified reviews exist, send a short no-reviews message.",
+      "skills": ["review-digest"],
+      "deliver": "slack:${SLACK_REVIEW_DIGEST_USER_ID}",
+      "workdir": "${REVIEW_MONOREPO_ROOT}"
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "repo",
+    "pr_number",
+    "head_sha",
+    "event",
+    "published",
+    "summary",
+    "findings",
+    "linear",
+    "limitations"
+  ],
+  "properties": {
+    "repo": {"type": "string", "minLength": 1},
+    "pr_number": {"type": "integer", "minimum": 1},
+    "head_sha": {"type": "string", "minLength": 7},
+    "event": {"type": "string", "enum": ["APPROVE", "COMMENT"]},
+    "published": {"type": "boolean"},
+    "summary": {"type": "string", "minLength": 1},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "severity", "path", "line", "body", "blocking"],
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": ["correctness", "security", "performance", "maintainability", "testing", "product", "documentation", "other"]
+          },
+          "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+          "path": {"type": ["string", "null"]},
+          "line": {"type": ["integer", "null"], "minimum": 1},
+          "body": {"type": "string", "minLength": 1},
+          "blocking": {"type": "boolean"}
+        }
+      }
+    },
+    "linear": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fetch_status", "key", "title", "url", "status", "project", "product_summary", "acceptance_criteria", "labels"],
+      "properties": {
+        "fetch_status": {"type": "string", "enum": ["available", "missing", "unavailable"]},
+        "key": {"type": ["string", "null"]},
+        "title": {"type": ["string", "null"]},
+        "url": {"type": ["string", "null"]},
+        "status": {"type": ["string", "null"]},
+        "project": {"type": ["string", "null"]},
+        "product_summary": {"type": ["string", "null"]},
+        "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+        "labels": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "limitations": {"type": "array", "items": {"type": "string"}}
+  }
+}
