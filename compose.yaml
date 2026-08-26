@@ -110,6 +110,9 @@ services:
       HERMES_GID: "${HERMES_GID:-10000}"
       PASEO_HOME: "/opt/data/.paseo"
       PASEO_PASSWORD: "${PASEO_PASSWORD:?set it in .env}"
+      # Allow the Compose service hostname used by Hermes while retaining
+      # Paseo's default localhost and IP-address allowances.
+      PASEO_HOSTNAMES: "paseo"
       PASEO_DOCKER_CERT_SOURCE: "/run/paseo-docker-certs"
       DOCKER_HOST: "tcp://paseo-docker:2376"
       DOCKER_TLS_VERIFY: "1"

@@ -73,6 +73,7 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
     def test_paseo_service_is_loopback_only_and_shares_persistent_state(self):
         self.assertIn('"127.0.0.1:${PASEO_HOST_PORT:-6767}:6767"', COMPOSE)
         self.assertIn('PASEO_PASSWORD: "${PASEO_PASSWORD:?set it in .env}"', COMPOSE)
+        self.assertIn('PASEO_HOSTNAMES: "paseo"', COMPOSE)
         self.assertIn("- hermes-data:/opt/data", COMPOSE)
         self.assertIn("--reuid=\"$HERMES_UID\"", PASEO_ENTRYPOINT)
         self.assertNotIn("chown -R", PASEO_ENTRYPOINT)
@@ -140,6 +141,7 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
             VERIFY,
         )
         self.assertIn("paseo project ls --host 127.0.0.1:6767 --json", VERIFY)
+        self.assertIn('paseo project ls --host "$PASEO_HOST" --json', VERIFY)
 
     def test_slack_policy_separates_owner_and_reviewer_slash_commands(self):
         self.assertIn(
