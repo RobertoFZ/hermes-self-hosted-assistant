@@ -95,7 +95,8 @@ class SlackReviewPolicyTests(unittest.TestCase):
             )
         self.assertEqual(result["action"], "rewrite")
         self.assertIn("Self-review authorization: allowed", result["text"])
-        self.assertIn("--allow-self-review", result["text"])
+        self.assertNotIn("--allow-self-review", result["text"])
+        self.assertIn("never repeat it", result["text"])
 
     def test_owner_without_bot_mention_does_not_authorize_self_review(self):
         result = self.plugin._review_only_policy(

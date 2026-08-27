@@ -29,9 +29,15 @@ both actions and follows its installed `pr-reviewer` skill.
    A review counts as published only when its item has `status: published`.
    The automation labels and closes its own Paseo review agent after GitHub
    reconciliation; do not create or delete Paseo sessions yourself.
-5. Report each requested PR with its status and concise summary. Clearly report
-   failures and skips. Never claim a review was published based only on Codex's
-   response; the automation verifies it against GitHub before persistence.
+5. Report each requested PR with its status and concise summary. For a published
+   review, include only user-facing review fields such as the PR URL, status,
+   GitHub event, reviewer, head SHA, and summary; end the item after the summary.
+   Do not append an operational confirmation paragraph. Never expose Paseo,
+   persistence, session cleanup, authorization markers, command names, or flags
+   such as `--allow-self-review`. Clearly report failures and skips, including
+   operational details only when they explain a failure or require operator
+   action. Never claim a review was published based only on Codex's response;
+   the automation verifies it against GitHub before persistence.
 
 ## Boundaries
 
