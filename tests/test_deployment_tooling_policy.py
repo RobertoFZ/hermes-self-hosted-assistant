@@ -21,9 +21,16 @@ APPLY_REVIEW_POLICY = (ROOT / "scripts" / "apply-review-policy.sh").read_text(
 )
 SYNC_SKILLS = (ROOT / "scripts" / "sync-skills.sh").read_text(encoding="utf-8")
 CRON_CONFIG = (ROOT / "config" / "crons.json").read_text(encoding="utf-8")
+REVIEW_RESULT_SCHEMA = (
+    ROOT / "automation" / "review-result.schema.json"
+).read_text(encoding="utf-8")
 
 
 class DeploymentToolingPolicyTests(unittest.TestCase):
+    def test_review_result_schema_uses_paseo_compatible_draft(self):
+        self.assertIn("http://json-schema.org/draft-07/schema#", REVIEW_RESULT_SCHEMA)
+        self.assertNotIn("draft/2020-12", REVIEW_RESULT_SCHEMA)
+
     def test_codex_cli_is_pinned_in_the_image(self):
         self.assertIn("ARG CODEX_VERSION=0.149.1", DOCKERFILE)
         self.assertIn(
