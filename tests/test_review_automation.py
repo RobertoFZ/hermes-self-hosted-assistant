@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -160,7 +162,11 @@ class ReviewAutomationTests(unittest.TestCase):
                 automation,
                 "invoke_codex",
                 side_effect=automation.AutomationError("delegated test stop"),
-            ) as invoke_codex:
+            ) as invoke_codex, patch.object(
+                automation,
+                "cleanup_paseo_review_agent",
+                return_value=[],
+            ) as cleanup_agent:
                 result = automation.review_one(
                     db,
                     pr.url,
@@ -169,7 +175,91 @@ class ReviewAutomationTests(unittest.TestCase):
                 )
 
             self.assertEqual(result["status"], "failed")
-            invoke_codex.assert_called_once_with(pr)
+            delegated_run_id = invoke_codex.call_args.kwargs["run_id"]
+            invoke_codex.assert_called_once_with(pr, run_id=delegated_run_id)
+            cleanup_agent.assert_called_once_with(delegated_run_id)
+
+    def test_cleanup_deletes_only_agents_with_the_review_run_label(self):
+        listed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {"id": "agent-one", "name": "review"},
+                    {"id": "agent-two", "name": "review retry"},
+                ]
+            ),
+            stderr="",
+        )
+        deleted = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="{}", stderr=""
+        )
+        with patch.dict(os.environ, {"PASEO_HOST": "paseo:6767"}), patch.object(
+            automation,
+            "run",
+            side_effect=[listed, deleted, deleted],
+        ) as run_command:
+            warnings = automation.cleanup_paseo_review_agent("run-123")
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(
+            run_command.call_args_list[0].args[0],
+            [
+                "paseo",
+                "ls",
+                "--host",
+                "paseo:6767",
+                "--all",
+                "--global",
+                "--label",
+                "hermes-review-run=run-123",
+                "--json",
+            ],
+        )
+        self.assertEqual(
+            run_command.call_args_list[1].args[0],
+            [
+                "paseo",
+                "delete",
+                "--host",
+                "paseo:6767",
+                "--json",
+                "agent-one",
+            ],
+        )
+        self.assertEqual(
+            run_command.call_args_list[2].args[0][-1],
+            "agent-two",
+        )
+
+    def test_invoke_codex_labels_the_review_agent(self):
+        pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/11",
+            repo="acme/api",
+            number=11,
+            title="Labeled review",
+            body="",
+            head_sha="e" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout='{"repo": "acme/api"}', stderr=""
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "PASEO_HOST": "paseo:6767",
+                "REVIEW_MONOREPO_ROOT": "/workspace",
+                "REVIEW_PASEO_TIMEOUT": "45m",
+            },
+        ), patch.object(automation, "run", return_value=completed) as run_command:
+            result = automation.invoke_codex(pr, run_id="run-456")
+
+        self.assertEqual(result, {"repo": "acme/api"})
+        command = run_command.call_args.args[0]
+        label_index = command.index("--label")
+        self.assertEqual(command[label_index + 1], "hermes-review-run=run-456")
 
 
 if __name__ == "__main__":

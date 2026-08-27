@@ -267,6 +267,9 @@ allowlist, records the PR head SHA, checks for an existing current-head review,
 launches one structured Codex run per PR, and then checks GitHub again. A Codex
 response is persisted as successful only when a new review or inline comment by
 the authenticated reviewer exists on the same head SHA. Retries are idempotent.
+Each delegated review agent receives a unique automation-run label and is
+hard-deleted after GitHub reconciliation, whether the review succeeds or fails.
+Cleanup is best-effort and cannot downgrade an otherwise verified review.
 
 Each successful record includes the review result and summary, normalized
 findings and severities, a snapshot of the related Linear issue when available,

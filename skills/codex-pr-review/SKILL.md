@@ -27,6 +27,8 @@ both actions and follows its installed `pr-reviewer` skill.
    `--allow-self-review` immediately after `review`.
 4. Treat the JSON from the command as authoritative orchestration state.
    A review counts as published only when its item has `status: published`.
+   The automation labels and closes its own Paseo review agent after GitHub
+   reconciliation; do not create or delete Paseo sessions yourself.
 5. Report each requested PR with its status and concise summary. Clearly report
    failures and skips. Never claim a review was published based only on Codex's
    response; the automation verifies it against GitHub before persistence.

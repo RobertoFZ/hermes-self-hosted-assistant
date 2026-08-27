@@ -25,6 +25,7 @@ PR_URL_RE = re.compile(
 )
 DEFAULT_DB = "/opt/data/review-history/reviews.sqlite3"
 DEFAULT_SCHEMA = "/opt/review-automation/review-result.schema.json"
+PASEO_REVIEW_LABEL = "hermes-review-run"
 
 
 class AutomationError(RuntimeError):
@@ -311,8 +312,63 @@ def paseo_timeout_seconds(value: str) -> int:
     return int(match.group(1)) * multiplier
 
 
-def invoke_codex(pr: PullRequest) -> dict[str, Any]:
-    host = os.environ.get("PASEO_HOST", "paseo:6767")
+def paseo_host() -> str:
+    return os.environ.get("PASEO_HOST", "paseo:6767")
+
+
+def cleanup_paseo_review_agent(run_id: str) -> list[str]:
+    """Best-effort hard-delete of only the Paseo agent created for this run."""
+    host = paseo_host()
+    label = f"{PASEO_REVIEW_LABEL}={run_id}"
+    warnings: list[str] = []
+    try:
+        listed = run(
+            [
+                "paseo",
+                "ls",
+                "--host",
+                host,
+                "--all",
+                "--global",
+                "--label",
+                label,
+                "--json",
+            ],
+            timeout=30,
+            check=False,
+            env=os.environ.copy(),
+        )
+        if listed.returncode:
+            detail = listed.stderr.strip() or listed.stdout.strip() or "unknown error"
+            return [f"unable to list the Paseo review agent: {detail}"]
+        try:
+            agents = json.loads(listed.stdout)
+        except json.JSONDecodeError:
+            return ["Paseo returned invalid JSON while locating the review agent"]
+        if not isinstance(agents, list):
+            return ["Paseo returned an unexpected agent-list response"]
+
+        for agent in agents:
+            agent_id = str(agent.get("id") or "") if isinstance(agent, dict) else ""
+            if not agent_id:
+                warnings.append("Paseo returned a labeled review agent without an ID")
+                continue
+            deleted = run(
+                ["paseo", "delete", "--host", host, "--json", agent_id],
+                timeout=30,
+                check=False,
+                env=os.environ.copy(),
+            )
+            if deleted.returncode:
+                detail = deleted.stderr.strip() or deleted.stdout.strip() or "unknown error"
+                warnings.append(f"unable to delete Paseo agent {agent_id}: {detail}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        warnings.append(f"unable to clean up the Paseo review agent: {exc}")
+    return warnings
+
+
+def invoke_codex(pr: PullRequest, *, run_id: str) -> dict[str, Any]:
+    host = paseo_host()
     workspace = os.environ.get("REVIEW_MONOREPO_ROOT", "").strip()
     if not workspace:
         raise AutomationError("REVIEW_MONOREPO_ROOT is required")
@@ -341,6 +397,8 @@ def invoke_codex(pr: PullRequest) -> dict[str, Any]:
         timeout_value,
         "--output-schema",
         schema,
+        "--label",
+        f"{PASEO_REVIEW_LABEL}={run_id}",
         "--json",
         "--title",
         f"PR review {pr.repo}#{pr.number}",
@@ -508,43 +566,54 @@ def review_one(
 
     structured: dict[str, Any] | None = None
     invocation_error: Exception | None = None
+    response: dict[str, Any] | None = None
     try:
-        structured = invoke_codex(pr)
-        validate_result(structured, pr)
-    except Exception as exc:  # Reconciliation must still run after timeout/failure.
-        invocation_error = exc
-        structured = None
+        try:
+            structured = invoke_codex(pr, run_id=run_id)
+            validate_result(structured, pr)
+        except Exception as exc:  # Reconciliation must still run after timeout/failure.
+            invocation_error = exc
+            structured = None
 
-    try:
-        after = github_publications(pr, login)
-        old_ids = publication_ids(before)
-        new_publications = {
-            kind: [item for item in after[kind] if (kind, int(item["id"])) not in old_ids]
-            for kind in ("reviews", "comments")
-        }
-        if publication_ids(new_publications):
-            if structured is None:
-                structured = {
-                    "summary": "GitHub publication verified after the delegated run ended without structured output.",
-                    "findings": [],
-                    "linear": {"fetch_status": "unavailable"},
-                    "limitations": [str(invocation_error)] if invocation_error else [],
-                }
-            persist_verified(db, run_id, structured, new_publications)
-            return {
-                "url": pr.url,
-                "status": "published",
-                "event": db.execute("SELECT event FROM review_runs WHERE id = ?", (run_id,)).fetchone()[0],
-                "head_sha": pr.head_sha,
-                "run_id": run_id,
-                "summary": structured.get("summary"),
+        try:
+            after = github_publications(pr, login)
+            old_ids = publication_ids(before)
+            new_publications = {
+                kind: [item for item in after[kind] if (kind, int(item["id"])) not in old_ids]
+                for kind in ("reviews", "comments")
             }
-        error = str(invocation_error or "no new GitHub publication was found")
-        mark_failed(db, run_id, error, structured)
-        return {"url": pr.url, "status": "failed", "head_sha": pr.head_sha, "error": error}
-    except Exception as exc:
-        mark_failed(db, run_id, str(exc), structured)
-        return {"url": pr.url, "status": "failed", "head_sha": pr.head_sha, "error": str(exc)}
+            if publication_ids(new_publications):
+                if structured is None:
+                    structured = {
+                        "summary": "GitHub publication verified after the delegated run ended without structured output.",
+                        "findings": [],
+                        "linear": {"fetch_status": "unavailable"},
+                        "limitations": [str(invocation_error)] if invocation_error else [],
+                    }
+                persist_verified(db, run_id, structured, new_publications)
+                response = {
+                    "url": pr.url,
+                    "status": "published",
+                    "event": db.execute("SELECT event FROM review_runs WHERE id = ?", (run_id,)).fetchone()[0],
+                    "head_sha": pr.head_sha,
+                    "run_id": run_id,
+                    "summary": structured.get("summary"),
+                }
+                return response
+            error = str(invocation_error or "no new GitHub publication was found")
+            mark_failed(db, run_id, error, structured)
+            response = {"url": pr.url, "status": "failed", "head_sha": pr.head_sha, "error": error}
+            return response
+        except Exception as exc:
+            mark_failed(db, run_id, str(exc), structured)
+            response = {"url": pr.url, "status": "failed", "head_sha": pr.head_sha, "error": str(exc)}
+            return response
+    finally:
+        cleanup_warnings = cleanup_paseo_review_agent(run_id)
+        if cleanup_warnings:
+            if response is not None:
+                response["cleanup_warnings"] = cleanup_warnings
+            print("; ".join(cleanup_warnings), file=sys.stderr)
 
 
 def review_urls(
