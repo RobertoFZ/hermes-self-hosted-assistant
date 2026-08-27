@@ -209,7 +209,11 @@ def migrate(db: sqlite3.Connection) -> None:
             event TEXT,
             summary TEXT,
             error TEXT,
-            structured_result TEXT
+            structured_result TEXT,
+            cleanup_status TEXT NOT NULL DEFAULT 'pending',
+            cleanup_attempted_at TEXT,
+            cleaned_at TEXT,
+            cleanup_error TEXT
         );
         CREATE INDEX IF NOT EXISTS review_runs_digest_idx
             ON review_runs(completed_at, status);
@@ -251,6 +255,29 @@ def migrate(db: sqlite3.Connection) -> None:
     )
     db.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?)",
+        (iso(utc_now()),),
+    )
+    columns = {
+        str(row["name"])
+        for row in db.execute("PRAGMA table_info(review_runs)").fetchall()
+    }
+    additions = {
+        "cleanup_status": "TEXT NOT NULL DEFAULT 'pending'",
+        "cleanup_attempted_at": "TEXT",
+        "cleaned_at": "TEXT",
+        "cleanup_error": "TEXT",
+    }
+    for name, declaration in additions.items():
+        if name not in columns:
+            db.execute(f"ALTER TABLE review_runs ADD COLUMN {name} {declaration}")
+    db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS review_runs_cleanup_idx
+        ON review_runs(status, cleanup_status, cleanup_attempted_at)
+        """
+    )
+    db.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?)",
         (iso(utc_now()),),
     )
     db.commit()
@@ -349,9 +376,15 @@ def claim_review_run(
 
 
 def finish_skipped(db: sqlite3.Connection, run_id: str, status: str, summary: str) -> None:
+    completed_at = iso(utc_now())
     db.execute(
-        "UPDATE review_runs SET completed_at = ?, status = ?, summary = ? WHERE id = ?",
-        (iso(utc_now()), status, summary, run_id),
+        """
+        UPDATE review_runs
+        SET completed_at = ?, status = ?, summary = ?, cleanup_status = 'not_needed',
+            cleanup_attempted_at = ?, cleaned_at = ?, cleanup_error = NULL
+        WHERE id = ?
+        """,
+        (completed_at, status, summary, completed_at, completed_at, run_id),
     )
     db.commit()
 
@@ -455,6 +488,96 @@ def cleanup_paseo_review_agent(run_id: str) -> list[str]:
             + ", ".join(agent_id for agent_id in remaining_ids if agent_id)
         )
     return warnings
+
+
+def cleanup_review_run(db: sqlite3.Connection, run_id: str) -> list[str]:
+    """Clean one labeled agent and persist the cleanup outcome independently."""
+    warnings = cleanup_paseo_review_agent(run_id)
+    attempted_at = iso(utc_now())
+    if warnings:
+        db.execute(
+            """
+            UPDATE review_runs
+            SET cleanup_status = 'failed', cleanup_attempted_at = ?,
+                cleanup_error = ?, cleaned_at = NULL
+            WHERE id = ?
+            """,
+            (attempted_at, "; ".join(warnings)[:4000], run_id),
+        )
+    else:
+        db.execute(
+            """
+            UPDATE review_runs
+            SET cleanup_status = 'clean', cleanup_attempted_at = ?,
+                cleaned_at = ?, cleanup_error = NULL
+            WHERE id = ?
+            """,
+            (attempted_at, attempted_at, run_id),
+        )
+    db.commit()
+    return warnings
+
+
+def reconcile_terminal_cleanup(
+    db_path: str | None = None,
+    *,
+    run_ids: Iterable[str] = (),
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Retry cleanup for terminal runs without changing review outcomes."""
+    if limit < 1 or limit > 1000:
+        raise AutomationError("cleanup limit must be between 1 and 1000")
+    requested_ids = list(
+        dict.fromkeys(run_id.strip() for run_id in run_ids if run_id.strip())
+    )
+    results: list[dict[str, Any]] = []
+    with connect_db(db_path) as db:
+        if requested_ids:
+            placeholders = ",".join("?" for _ in requested_ids)
+            rows = db.execute(
+                f"""
+                SELECT * FROM review_runs
+                WHERE id IN ({placeholders}) AND status != 'running'
+                ORDER BY requested_at ASC
+                """,
+                requested_ids,
+            ).fetchall()
+            found = {str(row["id"]) for row in rows}
+            results.extend(
+                {"run_id": run_id, "status": "not_found_or_running"}
+                for run_id in requested_ids
+                if run_id not in found
+            )
+        else:
+            rows = db.execute(
+                """
+                SELECT * FROM review_runs
+                WHERE status != 'running'
+                  AND cleanup_status NOT IN ('clean', 'not_needed')
+                ORDER BY COALESCE(cleanup_attempted_at, requested_at) ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+        for row in rows:
+            run_id = str(row["id"])
+            warnings = cleanup_review_run(db, run_id)
+            item: dict[str, Any] = {
+                "run_id": run_id,
+                "url": str(row["pr_url"]),
+                "review_status": str(row["status"]),
+                "status": "cleanup_failed" if warnings else "clean",
+            }
+            if warnings:
+                item["cleanup_warnings"] = warnings
+            results.append(item)
+    return {
+        "requested": len(requested_ids) if requested_ids else len(results),
+        "clean": sum(item["status"] == "clean" for item in results),
+        "failed": sum(item["status"] == "cleanup_failed" for item in results),
+        "results": results,
+    }
 
 
 def _json_objects(text: str) -> Iterable[dict[str, Any]]:
@@ -803,7 +926,7 @@ def recover_running_run(
     if structured is None:
         structured = recovered_result_fallback(pr, publications)
     persist_verified(db, run_id, structured, publications)
-    cleanup_warnings = cleanup_paseo_review_agent(run_id)
+    cleanup_warnings = cleanup_review_run(db, run_id)
     warnings.extend(cleanup_warnings)
 
     persisted = db.execute(
@@ -840,12 +963,16 @@ def review_one(
     before = github_publications(pr, login)
     claim_state, run_id = claim_review_run(db, pr, login)
     if claim_state == "published":
-        return {
+        response = {
             "url": pr.url,
             "status": "skipped_verified",
             "head_sha": pr.head_sha,
             "run_id": run_id,
         }
+        cleanup_warnings = cleanup_review_run(db, run_id)
+        if cleanup_warnings:
+            response["cleanup_warnings"] = cleanup_warnings
+        return response
     if claim_state == "running":
         running = db.execute(
             "SELECT * FROM review_runs WHERE id = ?", (run_id,)
@@ -872,7 +999,7 @@ def review_one(
             run_id,
             "Interrupted review exceeded its Paseo timeout without a GitHub publication.",
         )
-        cleanup_warnings = cleanup_paseo_review_agent(run_id)
+        cleanup_warnings = cleanup_review_run(db, run_id)
         if cleanup_warnings:
             print("; ".join(cleanup_warnings), file=sys.stderr)
         claim_state, run_id = claim_review_run(db, pr, login)
@@ -943,7 +1070,7 @@ def review_one(
             response = {"url": pr.url, "status": "failed", "head_sha": pr.head_sha, "error": str(exc)}
             return response
     finally:
-        cleanup_warnings = cleanup_paseo_review_agent(run_id)
+        cleanup_warnings = cleanup_review_run(db, run_id)
         if cleanup_warnings:
             if response is not None:
                 response["cleanup_warnings"] = cleanup_warnings
@@ -1008,14 +1135,17 @@ def recover_run_ids(
                 )
                 continue
             if str(row["status"]) == "published":
-                results.append(
-                    {
-                        "run_id": run_id,
-                        "url": str(row["pr_url"]),
-                        "head_sha": str(row["head_sha"]),
-                        "status": "skipped_verified",
-                    }
-                )
+                cleanup_warnings = cleanup_review_run(db, run_id)
+                item: dict[str, Any] = {
+                    "run_id": run_id,
+                    "url": str(row["pr_url"]),
+                    "head_sha": str(row["head_sha"]),
+                    "status": "skipped_verified",
+                    "cleanup_status": "failed" if cleanup_warnings else "clean",
+                }
+                if cleanup_warnings:
+                    item["cleanup_warnings"] = cleanup_warnings
+                results.append(item)
                 continue
             if str(row["status"]) != "running":
                 results.append(
@@ -1130,6 +1260,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="recover a published review even if Paseo still reports its agent as running",
     )
     recover.add_argument("run_ids", nargs="+")
+    cleanup = subparsers.add_parser(
+        "cleanup", help="retry cleanup for terminal review runs"
+    )
+    cleanup.add_argument("--limit", type=int, default=100)
+    cleanup.add_argument("run_ids", nargs="*")
     digest = subparsers.add_parser("digest-source", help="emit verified review data for a digest")
     digest.add_argument("--hours", type=int, default=24)
     digest.add_argument("--timezone", default=os.environ.get("TZ", "America/Mexico_City"))
@@ -1153,6 +1288,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "recover":
             emit(recover_run_ids(args.run_ids, args.db, force=args.force))
+        elif args.command == "cleanup":
+            emit(
+                reconcile_terminal_cleanup(
+                    args.db,
+                    run_ids=args.run_ids,
+                    limit=args.limit,
+                )
+            )
         elif args.command == "digest-source":
             emit(digest_source(args.db, hours=args.hours, timezone_name=args.timezone))
         return 0

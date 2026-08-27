@@ -19,6 +19,7 @@ POLICY_ENV = {
     "SLACK_REVIEW_OWNER_USER_IDS": "U_OWNER",
     "SLACK_REVIEWER_USER_IDS": "U_REVIEWER,U_SECOND",
     "SLACK_REVIEW_BOT_USER_IDS": "U_AGENT_BOT",
+    "SLACK_REVIEW_COMPETING_BOT_USER_IDS": "U_NACHO_BOT",
     "SLACK_REVIEW_ALLOWED_REPOSITORIES": "acme/api,acme/web",
 }
 
@@ -69,6 +70,61 @@ class SlackReviewPolicyTests(unittest.TestCase):
             frozenset({("acme", "api"), ("acme", "web")}),
         )
         self.assertEqual(self.plugin.REVIEW_BOT_USER_IDS, frozenset({"U_AGENT_BOT"}))
+        self.assertEqual(
+            self.plugin.COMPETING_BOT_USER_IDS, frozenset({"U_NACHO_BOT"})
+        )
+
+    def test_thread_context_url_is_not_inherited_by_current_message(self):
+        result = self.plugin._review_only_policy(
+            event(
+                "U_REVIEWER",
+                "C_REVIEW",
+                "Thread context https://github.com/acme/api/pull/42",
+                raw_message={"text": "thanks, I am checking it"},
+            )
+        )
+
+        self.assertEqual(result["reason"], "review-message-has-no-approved-pr")
+
+    def test_message_addressed_only_to_competing_bot_is_ignored(self):
+        result = self.plugin._review_only_policy(
+            event(
+                "U_REVIEWER",
+                "C_REVIEW",
+                "<@U_NACHO_BOT> revisa el PR pls "
+                "https://github.com/acme/api/pull/42",
+            ),
+            gateway=gateway(),
+        )
+
+        self.assertEqual(result["reason"], "review-addressed-to-competing-bot")
+
+    def test_message_addressed_to_both_bots_is_accepted(self):
+        with patch.object(self.plugin, "_schedule_review_started"):
+            result = self.plugin._review_only_policy(
+                event(
+                    "U_REVIEWER",
+                    "C_REVIEW",
+                    "<@U_NACHO_BOT> <@U_BOT> revisen "
+                    "https://github.com/acme/api/pull/42",
+                ),
+                gateway=gateway(),
+            )
+
+        self.assertEqual(result["action"], "rewrite")
+
+    def test_duplicate_slack_delivery_is_not_dispatched_twice(self):
+        request = event(
+            "U_REVIEWER",
+            "C_REVIEW",
+            "https://github.com/acme/api/pull/42",
+        )
+        with patch.object(self.plugin, "_schedule_review_started"):
+            first = self.plugin._review_only_policy(request)
+            second = self.plugin._review_only_policy(request)
+
+        self.assertEqual(first["action"], "rewrite")
+        self.assertEqual(second["reason"], "duplicate-review-message")
 
     def test_reviewer_can_submit_only_allowed_pr_urls_in_dm(self):
         result = self.plugin._review_only_policy(

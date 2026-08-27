@@ -32,14 +32,18 @@ both actions and follows its installed `pr-reviewer` skill.
    and hard-deletes its own Paseo review agent after GitHub reconciliation; do
    not create or delete Paseo sessions yourself. A recovered published item is
    still an ordinary verified publication for user-facing reporting.
-5. Report each requested PR with its status and concise summary. For a published
-   review, include only user-facing review fields such as the PR URL, status,
-   GitHub event, reviewer, head SHA, and summary; end the item after the summary.
+5. Return exactly one final response after the command completes. Do not send
+   progress updates, follow-up confirmations, or a second rendering of the same
+   result. Report each requested PR with its status and concise summary. For a
+   published review, include only user-facing review fields such as the PR URL,
+   status, GitHub event, reviewer, head SHA, and summary; end the item after the
+   summary.
    Do not append an operational confirmation paragraph. Never expose Paseo,
    persistence, session cleanup, authorization markers, command names, or flags
    such as `--allow-self-review`. Clearly report failures and skips, including
    operational details only when they explain a failure or require operator
-   action. Never claim a review was published based only on Codex's response;
+   action. Mention a cleanup warning only when the JSON says operator action is
+   required. Never claim a review was published based only on Codex's response;
    the automation verifies it against GitHub before persistence.
 
 ## Boundaries

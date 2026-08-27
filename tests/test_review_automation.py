@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -13,6 +14,60 @@ from automation import review_automation as automation
 
 
 class ReviewAutomationTests(unittest.TestCase):
+    def test_existing_database_migrates_cleanup_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with sqlite3.connect(database) as db:
+                db.executescript(
+                    """
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        applied_at TEXT NOT NULL
+                    );
+                    CREATE TABLE review_runs (
+                        id TEXT PRIMARY KEY,
+                        requested_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        repo TEXT NOT NULL,
+                        pr_number INTEGER NOT NULL,
+                        pr_url TEXT NOT NULL,
+                        pr_title TEXT NOT NULL,
+                        pr_author TEXT NOT NULL,
+                        base_ref TEXT NOT NULL,
+                        head_sha TEXT NOT NULL,
+                        reviewer_login TEXT NOT NULL,
+                        origin TEXT NOT NULL DEFAULT 'hermes-paseo-codex',
+                        status TEXT NOT NULL,
+                        event TEXT,
+                        summary TEXT,
+                        error TEXT,
+                        structured_result TEXT
+                    );
+                    INSERT INTO schema_migrations(version, applied_at)
+                    VALUES (1, '2026-08-27T00:00:00+00:00');
+                    """
+                )
+
+            with automation.connect_db(database) as db:
+                columns = {
+                    row["name"]
+                    for row in db.execute("PRAGMA table_info(review_runs)")
+                }
+                version = db.execute(
+                    "SELECT MAX(version) FROM schema_migrations"
+                ).fetchone()[0]
+
+        self.assertEqual(version, 2)
+        self.assertTrue(
+            {
+                "cleanup_status",
+                "cleanup_attempted_at",
+                "cleaned_at",
+                "cleanup_error",
+            }
+            <= columns
+        )
+
     def test_exact_pr_urls_and_repository_allowlist_are_enforced(self):
         with patch.dict(
             os.environ,
@@ -267,6 +322,85 @@ class ReviewAutomationTests(unittest.TestCase):
 
         self.assertTrue(any("did not confirm hard deletion" in item for item in warnings))
         self.assertTrue(any("still exists after deletion" in item for item in warnings))
+
+    def test_cleanup_outcome_is_persisted_without_changing_review_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/16",
+                repo="acme/api",
+                number=16,
+                title="Cleanup state",
+                body="",
+                head_sha="4" * 40,
+                base_ref="main",
+                author_login="developer",
+            )
+            with automation.connect_db(database) as db:
+                run_id = automation.insert_run(db, pr, "review-bot", "running")
+                automation.mark_failed(db, run_id, "review failure")
+                with patch.object(
+                    automation,
+                    "cleanup_paseo_review_agent",
+                    return_value=["delete failed"],
+                ):
+                    warnings = automation.cleanup_review_run(db, run_id)
+                failed = db.execute(
+                    "SELECT status, cleanup_status, cleanup_error "
+                    "FROM review_runs WHERE id = ?",
+                    (run_id,),
+                ).fetchone()
+                with patch.object(
+                    automation, "cleanup_paseo_review_agent", return_value=[]
+                ):
+                    automation.cleanup_review_run(db, run_id)
+                cleaned = db.execute(
+                    "SELECT status, cleanup_status, cleaned_at "
+                    "FROM review_runs WHERE id = ?",
+                    (run_id,),
+                ).fetchone()
+
+        self.assertEqual(warnings, ["delete failed"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["cleanup_status"], "failed")
+        self.assertIn("delete failed", failed["cleanup_error"])
+        self.assertEqual(cleaned["status"], "failed")
+        self.assertEqual(cleaned["cleanup_status"], "clean")
+        self.assertIsNotNone(cleaned["cleaned_at"])
+
+    def test_terminal_cleanup_reconciles_a_published_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/17",
+                repo="acme/api",
+                number=17,
+                title="Published orphan",
+                body="",
+                head_sha="5" * 40,
+                base_ref="main",
+                author_login="developer",
+            )
+            with automation.connect_db(database) as db:
+                run_id = automation.insert_run(db, pr, "review-bot", "running")
+                db.execute(
+                    "UPDATE review_runs SET status = 'published', completed_at = ? "
+                    "WHERE id = ?",
+                    (automation.iso(automation.utc_now()), run_id),
+                )
+                db.commit()
+            with patch.object(
+                automation, "cleanup_paseo_review_agent", return_value=[]
+            ) as cleanup_agent:
+                result = automation.reconcile_terminal_cleanup(str(database))
+            with automation.connect_db(database) as db:
+                cleanup_status = db.execute(
+                    "SELECT cleanup_status FROM review_runs WHERE id = ?", (run_id,)
+                ).fetchone()[0]
+
+        self.assertEqual(result["clean"], 1)
+        self.assertEqual(cleanup_status, "clean")
+        cleanup_agent.assert_called_once_with(run_id)
 
     def test_duplicate_request_returns_in_progress_without_second_agent(self):
         with tempfile.TemporaryDirectory() as directory:

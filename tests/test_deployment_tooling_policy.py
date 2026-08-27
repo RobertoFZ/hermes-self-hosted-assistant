@@ -153,6 +153,8 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
     def test_review_recovery_has_an_explicit_make_target(self):
         self.assertIn("review-recover: ##", MAKEFILE)
         self.assertIn("review_automation.py recover", MAKEFILE)
+        self.assertIn("review-cleanup: ##", MAKEFILE)
+        self.assertIn("review_automation.py cleanup", MAKEFILE)
 
     def test_slack_policy_separates_owner_and_reviewer_slash_commands(self):
         self.assertIn(

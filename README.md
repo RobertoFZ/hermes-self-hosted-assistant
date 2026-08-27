@@ -89,6 +89,7 @@ SLACK_ALLOWED_USERS=OWNER_ID,REVIEWER_ID,TRUSTED_REVIEW_BOT_ID
 SLACK_REVIEW_OWNER_USER_IDS=OWNER_ID
 SLACK_REVIEWER_USER_IDS=REVIEWER_ID
 SLACK_REVIEW_BOT_USER_IDS=TRUSTED_REVIEW_BOT_ID
+SLACK_REVIEW_COMPETING_BOT_USER_IDS=NACHO_BOT_ID
 SLACK_REVIEW_CHANNEL_ID=CHANNEL_ID
 SLACK_REVIEW_DIGEST_USER_ID=OWNER_ID
 TZ=America/Mexico_City
@@ -105,6 +106,9 @@ exact allowlisted PR URL. Trusted bot messages are accepted only in the review
 channel and additionally require review-request intent such as `Solicitud de
 revisión` or `ready for review`; URLs may be present in Slack Block Kit or
 attachments. Other bots and bot status messages remain ignored.
+`SLACK_REVIEW_COMPETING_BOT_USER_IDS` lists bots such as a second review agent:
+when a human explicitly addresses one of them without also mentioning Hermes,
+Hermes ignores that message even if Slack supplies PR context from the thread.
 
 Build and start:
 
@@ -238,13 +242,18 @@ The Slack policy behaves as follows:
 - Delegated reviewers can submit review requests only in the configured channel
   or one-to-one DMs.
 - Delegated messages must contain one or more allowed GitHub PR URLs.
+- Only the current Slack message supplies URLs; inherited thread context cannot
+  turn a reply into a review request.
+- A message explicitly addressed to a configured competing bot is ignored
+  unless it also mentions Hermes. Messages with no bot mention keep the natural
+  URL-only trigger.
 - Allowed PR URLs trigger reviews regardless of surrounding wording. A PR
   authored by the authenticated GitHub reviewer is the exception: it is
   reviewed only when a configured Slack owner mentions the Hermes bot in the
   same message. Other PRs in a mixed message continue normally.
 - Unsupported URLs or unrelated instructions are discarded before inference.
-- Accepted requests get one immediate threaded acknowledgement; tool progress
-  remains hidden until Hermes posts the result.
+- Accepted requests get one immediate validation acknowledgement; tool progress
+  remains hidden and Hermes posts exactly one final result.
 
 ## Review delegation and persistence
 
@@ -278,6 +287,9 @@ requests reuse that run instead of launching another Codex agent. Each delegated
 review agent receives a unique automation-run label and is hard-deleted after
 GitHub reconciliation, whether the review succeeds or fails. Cleanup validates
 Paseo's deleted agent ID and count, then confirms the label no longer resolves.
+Its outcome and error are persisted independently from the review result, so a
+successful GitHub publication remains successful even when session deletion
+must be retried. Duplicate requests and the daily digest retry pending cleanup.
 
 If Hermes is interrupted after GitHub publication but before persistence, a
 later duplicate request recovers terminal structured output from the labeled
@@ -293,6 +305,14 @@ Paseo result is unavailable and records that limitation in review history. If
 the agent has finished but recovery continues to report `in_progress`, retry
 with `FORCE=1`; this explicitly permits fallback recovery and deletion of an
 agent Paseo still reports as active.
+
+Reconcile every pending terminal session, or one known run, without changing
+review outcomes:
+
+```bash
+make review-cleanup
+make review-cleanup RUN_ID=REVIEW_RUN_UUID
+```
 
 Each successful record includes the review result and summary, normalized
 findings and severities, a snapshot of the related Linear issue when available,
@@ -377,6 +397,7 @@ make cron-status          # list active Hermes cron jobs
 make digest-preview       # inspect verified 24-hour digest data
 make review-history-init  # migrate the SQLite review history
 make review-recover RUN_ID=UUID # recover an interrupted published review
+make review-cleanup        # retry terminal Paseo session cleanup
 make workspace-status     # validate root and initialized submodules
 make workspace-sync       # safely fetch review refs
 make apply-review-policy  # persist Slack review-only configuration
