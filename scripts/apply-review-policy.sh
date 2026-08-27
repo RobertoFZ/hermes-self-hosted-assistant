@@ -17,7 +17,7 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   require_value SLACK_REVIEW_ALLOWED_REPOSITORIES
   require_value REVIEW_MONOREPO_ROOT
 
-  python -c "import os,sys; values=lambda name: {item.strip() for item in os.environ.get(name, \"\").split(\",\") if item.strip()}; allowed=values(\"SLACK_ALLOWED_USERS\"); required=values(\"SLACK_REVIEW_OWNER_USER_IDS\") | values(\"SLACK_REVIEWER_USER_IDS\"); sys.exit(0 if required <= allowed else \"Every owner and reviewer must also be present in SLACK_ALLOWED_USERS\")"
+  python -c "import os,sys; values=lambda name: {item.strip() for item in os.environ.get(name, \"\").split(\",\") if item.strip()}; allowed=values(\"SLACK_ALLOWED_USERS\"); required=values(\"SLACK_REVIEW_OWNER_USER_IDS\") | values(\"SLACK_REVIEWER_USER_IDS\") | values(\"SLACK_REVIEW_BOT_USER_IDS\"); sys.exit(0 if required <= allowed else \"Every owner, reviewer, and review bot must also be present in SLACK_ALLOWED_USERS\")"
 
   case "$SLACK_REVIEW_CHANNEL_ID" in
     C[A-Z0-9]*|G[A-Z0-9]*) ;;
@@ -38,6 +38,7 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   hermes config set slack.channel_skill_bindings "$channel_bindings"
   hermes config set slack.ignore_other_user_mentions false
   hermes config set slack.thread_require_mention false
+  hermes config set gateway.platforms.slack.extra.allow_bots all
   hermes config set gateway.platforms.slack.extra.allow_admin_from "$owner_ids"
   hermes config set gateway.platforms.slack.extra.user_allowed_commands "[]"
   hermes config set gateway.platforms.slack.extra.group_allow_admin_from "$owner_ids"

@@ -85,9 +85,10 @@ never overwritten.
 Fill in these deployment-specific values in `.review.env`:
 
 ```dotenv
-SLACK_ALLOWED_USERS=OWNER_ID,REVIEWER_ID
+SLACK_ALLOWED_USERS=OWNER_ID,REVIEWER_ID,TRUSTED_REVIEW_BOT_ID
 SLACK_REVIEW_OWNER_USER_IDS=OWNER_ID
 SLACK_REVIEWER_USER_IDS=REVIEWER_ID
+SLACK_REVIEW_BOT_USER_IDS=TRUSTED_REVIEW_BOT_ID
 SLACK_REVIEW_CHANNEL_ID=CHANNEL_ID
 SLACK_REVIEW_DIGEST_USER_ID=OWNER_ID
 TZ=America/Mexico_City
@@ -97,8 +98,13 @@ TZ=America/Mexico_City
 configured; cron synchronization uses that owner as the digest recipient.
 
 The repository and submodule defaults are already declared in the example.
-`SLACK_ALLOWED_USERS` must contain the owner plus every delegated reviewer
-because the Hermes Slack adapter authorizes users before the review policy runs.
+`SLACK_ALLOWED_USERS` must contain the owner, every delegated reviewer, and
+every trusted review bot because the Hermes Slack adapter authorizes senders
+before the review policy runs. Human owner/reviewer messages trigger from an
+exact allowlisted PR URL. Trusted bot messages are accepted only in the review
+channel and additionally require review-request intent such as `Solicitud de
+revisión` or `ready for review`; URLs may be present in Slack Block Kit or
+attachments. Other bots and bot status messages remain ignored.
 
 Build and start:
 

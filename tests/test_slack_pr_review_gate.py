@@ -18,6 +18,7 @@ POLICY_ENV = {
     "SLACK_REVIEW_CHANNEL_ID": "C_REVIEW",
     "SLACK_REVIEW_OWNER_USER_IDS": "U_OWNER",
     "SLACK_REVIEWER_USER_IDS": "U_REVIEWER,U_SECOND",
+    "SLACK_REVIEW_BOT_USER_IDS": "U_AGENT_BOT",
     "SLACK_REVIEW_ALLOWED_REPOSITORIES": "acme/api,acme/web",
 }
 
@@ -67,6 +68,7 @@ class SlackReviewPolicyTests(unittest.TestCase):
             self.plugin.ALLOWED_REPOSITORIES,
             frozenset({("acme", "api"), ("acme", "web")}),
         )
+        self.assertEqual(self.plugin.REVIEW_BOT_USER_IDS, frozenset({"U_AGENT_BOT"}))
 
     def test_reviewer_can_submit_only_allowed_pr_urls_in_dm(self):
         result = self.plugin._review_only_policy(
@@ -163,6 +165,76 @@ class SlackReviewPolicyTests(unittest.TestCase):
             event("U_UNKNOWN", "C_REVIEW", "https://github.com/acme/api/pull/1")
         )
         self.assertEqual(result["reason"], "review-user-not-allowed")
+
+    def test_trusted_bot_review_request_reads_url_from_block_kit(self):
+        result = self.plugin._review_only_policy(
+            event(
+                "U_AGENT_BOT",
+                "C_REVIEW",
+                "",
+                raw_message={
+                    "subtype": "bot_message",
+                    "blocks": [
+                        {
+                            "type": "rich_text",
+                            "elements": [
+                                {
+                                    "type": "rich_text_section",
+                                    "elements": [
+                                        {
+                                            "type": "text",
+                                            "text": "Solicitud de revisión: "
+                                            "estos PRs están listos para revisión ",
+                                        },
+                                        {
+                                            "type": "link",
+                                            "url": "https://github.com/acme/api/pull/210",
+                                            "text": "acme/api #210",
+                                        },
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+        )
+        self.assertEqual(result["action"], "rewrite")
+        self.assertIn("https://github.com/acme/api/pull/210", result["text"])
+        self.assertIn("Self-review authorization: denied", result["text"])
+
+    def test_trusted_bot_url_without_review_intent_is_ignored(self):
+        result = self.plugin._review_only_policy(
+            event(
+                "U_AGENT_BOT",
+                "C_REVIEW",
+                "Build completed for https://github.com/acme/api/pull/210",
+                raw_message={"subtype": "bot_message"},
+            )
+        )
+        self.assertEqual(result["reason"], "review-bot-message-has-no-intent")
+
+    def test_untrusted_bot_review_request_is_rejected(self):
+        result = self.plugin._review_only_policy(
+            event(
+                "U_OTHER_BOT",
+                "C_REVIEW",
+                "Review request https://github.com/acme/api/pull/210",
+                raw_message={"subtype": "bot_message"},
+            )
+        )
+        self.assertEqual(result["reason"], "review-user-not-allowed")
+
+    def test_trusted_bot_is_restricted_to_review_channel(self):
+        result = self.plugin._review_only_policy(
+            event(
+                "U_AGENT_BOT",
+                "D_DIRECT",
+                "Review request https://github.com/acme/api/pull/210",
+                raw_message={"subtype": "bot_message"},
+            )
+        )
+        self.assertEqual(result["reason"], "review-bot-surface-not-allowed")
 
 
 if __name__ == "__main__":

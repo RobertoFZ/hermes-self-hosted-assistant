@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import unicodedata
 
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ def _repository_values(name: str) -> frozenset[tuple[str, str]]:
 REVIEW_CHANNEL_ID = os.environ.get("SLACK_REVIEW_CHANNEL_ID", "").strip()
 OWNER_USER_IDS = _csv_values("SLACK_REVIEW_OWNER_USER_IDS")
 REVIEWER_USER_IDS = _csv_values("SLACK_REVIEWER_USER_IDS")
+REVIEW_BOT_USER_IDS = _csv_values("SLACK_REVIEW_BOT_USER_IDS")
 ALLOWED_REPOSITORIES = _repository_values(
     "SLACK_REVIEW_ALLOWED_REPOSITORIES"
 )
@@ -47,6 +49,17 @@ _PR_URL_RE = re.compile(
     r"(?P<owner>[A-Za-z0-9_.-]+)/"
     r"(?P<repo>[A-Za-z0-9_.-]+)/pull/"
     r"(?P<number>[1-9][0-9]*)(?![0-9])",
+    re.IGNORECASE,
+)
+
+_BOT_REVIEW_INTENT_RE = re.compile(
+    r"\b(?:"
+    r"solicitud(?:es)?\s+de\s+revision|"
+    r"(?:listo|lista|listos|listas)\s+para\s+(?:la\s+)?revision|"
+    r"(?:revisa|revisar|revisen)\s+(?:este|esta|estos|estas|el|la|los|las)?\s*"
+    r"(?:pr|prs|pull\s+request|pull\s+requests)|"
+    r"review\s+request|ready\s+for\s+review|please\s+review"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -81,6 +94,34 @@ def _extract_allowed_pr_urls(text: str) -> tuple[list[str], bool]:
             urls.append(url)
 
     return urls, unsupported
+
+
+def _iter_slack_strings(value):
+    """Yield strings from JSON-shaped Slack blocks or attachments."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for nested in value.values():
+            yield from _iter_slack_strings(nested)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            yield from _iter_slack_strings(nested)
+
+
+def _slack_message_content(event) -> str:
+    """Return current-message text plus Block Kit and attachment content."""
+    parts = [str(getattr(event, "text", "") or "")]
+    raw_message = getattr(event, "raw_message", None)
+    if isinstance(raw_message, dict):
+        for key in ("text", "blocks", "attachments"):
+            parts.extend(_iter_slack_strings(raw_message.get(key)))
+    return "\n".join(dict.fromkeys(part for part in parts if part))
+
+
+def _has_bot_review_intent(text: str) -> bool:
+    normalized = unicodedata.normalize("NFKD", text or "")
+    folded = "".join(char for char in normalized if not unicodedata.combining(char))
+    return _BOT_REVIEW_INTENT_RE.search(folded) is not None
 
 
 def _remember_ack_event(source, event) -> bool:
@@ -184,6 +225,7 @@ def _review_only_policy(event, gateway=None, **_kwargs):
     chat_id = str(getattr(source, "chat_id", "") or "")
     is_review_channel = chat_id == REVIEW_CHANNEL_ID
     is_direct_message = chat_id.startswith("D")
+    is_review_bot = user_id in REVIEW_BOT_USER_IDS
 
     # The owner retains normal access outside the dedicated review channel.
     if user_id in OWNER_USER_IDS and not is_review_channel:
@@ -191,14 +233,20 @@ def _review_only_policy(event, gateway=None, **_kwargs):
 
     # Delegated users may request reviews only in the dedicated channel or a
     # one-to-one Slack DM. Group DMs and all other channels remain blocked.
-    if user_id in REVIEWER_USER_IDS:
+    if is_review_bot:
+        if not is_review_channel:
+            return {"action": "skip", "reason": "review-bot-surface-not-allowed"}
+    elif user_id in REVIEWER_USER_IDS:
         if not is_review_channel and not is_direct_message:
             return {"action": "skip", "reason": "reviewer-surface-not-allowed"}
     elif user_id not in OWNER_USER_IDS:
         return {"action": "skip", "reason": "review-user-not-allowed"}
 
-    original_text = str(getattr(event, "text", "") or "")
-    urls, contains_unsupported_pr = _extract_allowed_pr_urls(original_text)
+    message_content = _slack_message_content(event)
+    if is_review_bot and not _has_bot_review_intent(message_content):
+        return {"action": "skip", "reason": "review-bot-message-has-no-intent"}
+
+    urls, contains_unsupported_pr = _extract_allowed_pr_urls(message_content)
     if not urls:
         return {"action": "skip", "reason": "review-message-has-no-approved-pr"}
     if contains_unsupported_pr:

@@ -7,7 +7,7 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   : "${SLACK_REVIEW_CHANNEL_ID:?set it in .review.env}"
   : "${PASEO_HOST:?PASEO_HOST is not configured}"
 
-  python -c "import os,sys; values=lambda name: {item.strip() for item in os.environ.get(name, \"\").split(\",\") if item.strip()}; allowed=values(\"SLACK_ALLOWED_USERS\"); required=values(\"SLACK_REVIEW_OWNER_USER_IDS\") | values(\"SLACK_REVIEWER_USER_IDS\"); sys.exit(0 if required <= allowed else \"Slack policy users are missing from SLACK_ALLOWED_USERS\")"
+  python -c "import os,sys; values=lambda name: {item.strip() for item in os.environ.get(name, \"\").split(\",\") if item.strip()}; allowed=values(\"SLACK_ALLOWED_USERS\"); required=values(\"SLACK_REVIEW_OWNER_USER_IDS\") | values(\"SLACK_REVIEWER_USER_IDS\") | values(\"SLACK_REVIEW_BOT_USER_IDS\"); sys.exit(0 if required <= allowed else \"Slack policy users or bots are missing from SLACK_ALLOWED_USERS\")"
 
   hermes auth status openai-codex
   gh auth status --active --hostname github.com
@@ -24,7 +24,7 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   hermes skills list | grep -F review-digest >/dev/null
   test ! -e /opt/data/skills/custom/pr-reviewer
   hermes plugins list | grep -F slack-pr-review-gate >/dev/null
-  python -c "import os,subprocess,sys,yaml; get=lambda key: yaml.safe_load(subprocess.check_output([\"hermes\", \"config\", \"get\", key], text=True)); expected={value.strip() for value in os.environ[\"SLACK_REVIEW_OWNER_USER_IDS\"].split(\",\") if value.strip()}; valid=set(get(\"gateway.platforms.slack.extra.allow_admin_from\") or []) == expected and get(\"gateway.platforms.slack.extra.user_allowed_commands\") == [] and set(get(\"gateway.platforms.slack.extra.group_allow_admin_from\") or []) == expected and get(\"gateway.platforms.slack.extra.group_user_allowed_commands\") == []; sys.exit(0 if valid else \"Slack slash-command access policy is not applied\")"
+  python -c "import os,subprocess,sys,yaml; get=lambda key: yaml.safe_load(subprocess.check_output([\"hermes\", \"config\", \"get\", key], text=True)); expected={value.strip() for value in os.environ[\"SLACK_REVIEW_OWNER_USER_IDS\"].split(\",\") if value.strip()}; valid=get(\"gateway.platforms.slack.extra.allow_bots\") == \"all\" and set(get(\"gateway.platforms.slack.extra.allow_admin_from\") or []) == expected and get(\"gateway.platforms.slack.extra.user_allowed_commands\") == [] and set(get(\"gateway.platforms.slack.extra.group_allow_admin_from\") or []) == expected and get(\"gateway.platforms.slack.extra.group_user_allowed_commands\") == []; sys.exit(0 if valid else \"Slack review or slash-command access policy is not applied\")"
   /opt/review-workspace/prepare-workspace.sh --check
   python3 /opt/review-automation/review_automation.py init >/dev/null
   python3 /opt/review-tooling/sync_crons.py --check

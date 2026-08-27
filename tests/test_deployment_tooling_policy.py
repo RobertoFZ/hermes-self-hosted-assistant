@@ -152,6 +152,9 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
 
     def test_slack_policy_separates_owner_and_reviewer_slash_commands(self):
         self.assertIn(
+            "gateway.platforms.slack.extra.allow_bots all", APPLY_REVIEW_POLICY
+        )
+        self.assertIn(
             "gateway.platforms.slack.extra.allow_admin_from", APPLY_REVIEW_POLICY
         )
         self.assertIn(
@@ -167,7 +170,7 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
             APPLY_REVIEW_POLICY,
         )
         self.assertIn(
-            "Slack slash-command access policy is not applied", VERIFY
+            "Slack review or slash-command access policy is not applied", VERIFY
         )
 
 
