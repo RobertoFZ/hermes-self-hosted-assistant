@@ -150,6 +150,10 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn("paseo project ls --host 127.0.0.1:6767 --json", VERIFY)
         self.assertIn('paseo project ls --host "$PASEO_HOST" --json', VERIFY)
 
+    def test_review_recovery_has_an_explicit_make_target(self):
+        self.assertIn("review-recover: ##", MAKEFILE)
+        self.assertIn("review_automation.py recover", MAKEFILE)
+
     def test_slack_policy_separates_owner_and_reviewer_slash_commands(self):
         self.assertIn(
             "gateway.platforms.slack.extra.allow_bots all", APPLY_REVIEW_POLICY

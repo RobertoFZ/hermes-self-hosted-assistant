@@ -272,10 +272,27 @@ For a Hermes request, the automation validates the exact URL and repository
 allowlist, records the PR head SHA, checks for an existing current-head review,
 launches one structured Codex run per PR, and then checks GitHub again. A Codex
 response is persisted as successful only when a new review or inline comment by
-the authenticated reviewer exists on the same head SHA. Retries are idempotent.
-Each delegated review agent receives a unique automation-run label and is
-hard-deleted after GitHub reconciliation, whether the review succeeds or fails.
-Cleanup is best-effort and cannot downgrade an otherwise verified review.
+the authenticated reviewer exists on the same head SHA. An atomic SQLite claim
+allows only one in-progress run per PR head and reviewer; duplicate Slack
+requests reuse that run instead of launching another Codex agent. Each delegated
+review agent receives a unique automation-run label and is hard-deleted after
+GitHub reconciliation, whether the review succeeds or fails. Cleanup validates
+Paseo's deleted agent ID and count, then confirms the label no longer resolves.
+
+If Hermes is interrupted after GitHub publication but before persistence, a
+later duplicate request recovers terminal structured output from the labeled
+Paseo agent, verifies the publication, persists the original run, and removes
+the agent. An operator can recover a known interrupted run immediately with:
+
+```bash
+make review-recover RUN_ID=REVIEW_RUN_UUID
+```
+
+The recovery falls back to GitHub publication data only when the structured
+Paseo result is unavailable and records that limitation in review history. If
+the agent has finished but recovery continues to report `in_progress`, retry
+with `FORCE=1`; this explicitly permits fallback recovery and deletion of an
+agent Paseo still reports as active.
 
 Each successful record includes the review result and summary, normalized
 findings and severities, a snapshot of the related Linear issue when available,
@@ -359,6 +376,7 @@ make sync-crons           # reconcile jobs from config/crons.json
 make cron-status          # list active Hermes cron jobs
 make digest-preview       # inspect verified 24-hour digest data
 make review-history-init  # migrate the SQLite review history
+make review-recover RUN_ID=UUID # recover an interrupted published review
 make workspace-status     # validate root and initialized submodules
 make workspace-sync       # safely fetch review refs
 make apply-review-policy  # persist Slack review-only configuration

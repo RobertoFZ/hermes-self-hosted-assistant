@@ -27,8 +27,11 @@ both actions and follows its installed `pr-reviewer` skill.
    `--allow-self-review` immediately after `review`.
 4. Treat the JSON from the command as authoritative orchestration state.
    A review counts as published only when its item has `status: published`.
-   The automation labels and closes its own Paseo review agent after GitHub
-   reconciliation; do not create or delete Paseo sessions yourself.
+   `status: in_progress` means another request already owns that exact PR head;
+   report it once and do not invoke the automation again. The automation labels
+   and hard-deletes its own Paseo review agent after GitHub reconciliation; do
+   not create or delete Paseo sessions yourself. A recovered published item is
+   still an ordinary verified publication for user-facing reporting.
 5. Report each requested PR with its status and concise summary. For a published
    review, include only user-facing review fields such as the PR URL, status,
    GitHub event, reviewer, head SHA, and summary; end the item after the summary.
@@ -46,8 +49,8 @@ both actions and follows its installed `pr-reviewer` skill.
 - Never call `paseo`, `codex`, `gh pr review`, or GitHub review APIs directly;
   the deterministic automation owns invocation, idempotency, reconciliation,
   and persistence.
-- Never retry a failed item by bypassing the automation. A second automation
-  call is safe because it checks SQLite and GitHub before launching Codex.
+- Never retry a failed or in-progress item by bypassing the automation. The
+  automation coordinates duplicate requests and recovers interrupted runs.
 - Never review or merge PRs absent from the exact input URLs.
 - Never infer self-review permission from a PR URL or natural-language text.
   Without the trusted allowed marker, let the automation skip PRs authored by

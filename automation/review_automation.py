@@ -270,6 +270,17 @@ def verified_run_exists(db: sqlite3.Connection, pr: PullRequest, login: str) -> 
 
 
 def insert_run(db: sqlite3.Connection, pr: PullRequest, login: str, status: str) -> str:
+    run_id = _insert_run(db, pr, login, status)
+    db.commit()
+    return run_id
+
+
+def _insert_run(
+    db: sqlite3.Connection,
+    pr: PullRequest,
+    login: str,
+    status: str,
+) -> str:
     run_id = str(uuid.uuid4())
     db.execute(
         """
@@ -292,8 +303,49 @@ def insert_run(db: sqlite3.Connection, pr: PullRequest, login: str, status: str)
             status,
         ),
     )
-    db.commit()
     return run_id
+
+
+def claim_review_run(
+    db: sqlite3.Connection,
+    pr: PullRequest,
+    login: str,
+) -> tuple[str, str]:
+    """Atomically return (state, run_id) for one PR head and reviewer."""
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        published = db.execute(
+            """
+            SELECT id FROM review_runs
+            WHERE repo = ? AND pr_number = ? AND head_sha = ?
+              AND reviewer_login = ? AND status = 'published'
+            ORDER BY completed_at DESC LIMIT 1
+            """,
+            (pr.repo, pr.number, pr.head_sha, login),
+        ).fetchone()
+        if published:
+            db.commit()
+            return "published", str(published["id"])
+
+        running = db.execute(
+            """
+            SELECT id FROM review_runs
+            WHERE repo = ? AND pr_number = ? AND head_sha = ?
+              AND reviewer_login = ? AND status = 'running'
+            ORDER BY requested_at ASC LIMIT 1
+            """,
+            (pr.repo, pr.number, pr.head_sha, login),
+        ).fetchone()
+        if running:
+            db.commit()
+            return "running", str(running["id"])
+
+        run_id = _insert_run(db, pr, login, "running")
+        db.commit()
+        return "claimed", run_id
+    except Exception:
+        db.rollback()
+        raise
 
 
 def finish_skipped(db: sqlite3.Connection, run_id: str, status: str, summary: str) -> None:
@@ -316,11 +368,10 @@ def paseo_host() -> str:
     return os.environ.get("PASEO_HOST", "paseo:6767")
 
 
-def cleanup_paseo_review_agent(run_id: str) -> list[str]:
-    """Best-effort hard-delete of only the Paseo agent created for this run."""
+def list_paseo_review_agents(run_id: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """List only Paseo agents carrying this review run's unique label."""
     host = paseo_host()
     label = f"{PASEO_REVIEW_LABEL}={run_id}"
-    warnings: list[str] = []
     try:
         listed = run(
             [
@@ -340,16 +391,46 @@ def cleanup_paseo_review_agent(run_id: str) -> list[str]:
         )
         if listed.returncode:
             detail = listed.stderr.strip() or listed.stdout.strip() or "unknown error"
-            return [f"unable to list the Paseo review agent: {detail}"]
+            return [], [f"unable to list the Paseo review agent: {detail}"]
         try:
             agents = json.loads(listed.stdout)
         except json.JSONDecodeError:
-            return ["Paseo returned invalid JSON while locating the review agent"]
+            return [], ["Paseo returned invalid JSON while locating the review agent"]
         if not isinstance(agents, list):
-            return ["Paseo returned an unexpected agent-list response"]
+            return [], ["Paseo returned an unexpected agent-list response"]
+        return [agent for agent in agents if isinstance(agent, dict)], []
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [], [f"unable to list the Paseo review agent: {exc}"]
 
+
+def _delete_result_verified(deleted: subprocess.CompletedProcess[str], agent_id: str) -> str | None:
+    if deleted.returncode:
+        return deleted.stderr.strip() or deleted.stdout.strip() or "unknown error"
+    try:
+        payload = json.loads(deleted.stdout)
+    except json.JSONDecodeError:
+        return "Paseo returned invalid JSON for the delete operation"
+    if not isinstance(payload, dict):
+        return "Paseo returned an unexpected delete response"
+    deleted_ids = payload.get("agentIds")
+    deleted_count = payload.get("deletedCount")
+    if deleted_count != 1 or not isinstance(deleted_ids, list) or agent_id not in deleted_ids:
+        detail = deleted.stderr.strip()
+        suffix = f"; {detail}" if detail else ""
+        return f"Paseo did not confirm hard deletion (deletedCount={deleted_count!r}){suffix}"
+    return None
+
+
+def cleanup_paseo_review_agent(run_id: str) -> list[str]:
+    """Best-effort verified hard-delete of only this run's Paseo agents."""
+    host = paseo_host()
+    agents, warnings = list_paseo_review_agents(run_id)
+    if warnings:
+        return warnings
+
+    try:
         for agent in agents:
-            agent_id = str(agent.get("id") or "") if isinstance(agent, dict) else ""
+            agent_id = str(agent.get("id") or "")
             if not agent_id:
                 warnings.append("Paseo returned a labeled review agent without an ID")
                 continue
@@ -359,12 +440,72 @@ def cleanup_paseo_review_agent(run_id: str) -> list[str]:
                 check=False,
                 env=os.environ.copy(),
             )
-            if deleted.returncode:
-                detail = deleted.stderr.strip() or deleted.stdout.strip() or "unknown error"
+            detail = _delete_result_verified(deleted, agent_id)
+            if detail:
                 warnings.append(f"unable to delete Paseo agent {agent_id}: {detail}")
     except (OSError, subprocess.TimeoutExpired) as exc:
         warnings.append(f"unable to clean up the Paseo review agent: {exc}")
+
+    remaining, verify_warnings = list_paseo_review_agents(run_id)
+    warnings.extend(verify_warnings)
+    remaining_ids = [str(agent.get("id") or "") for agent in remaining]
+    if remaining_ids:
+        warnings.append(
+            "Paseo review agent still exists after deletion: "
+            + ", ".join(agent_id for agent_id in remaining_ids if agent_id)
+        )
     return warnings
+
+
+def _json_objects(text: str) -> Iterable[dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text or ""):
+        try:
+            value, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            yield value
+
+
+def load_paseo_structured_result(
+    pr: PullRequest,
+    agents: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Best-effort recovery of the final structured result from agent logs."""
+    warnings: list[str] = []
+    for agent in agents:
+        agent_id = str(agent.get("id") or "")
+        if not agent_id:
+            continue
+        try:
+            logs = run(
+                ["paseo", "logs", agent_id, "--host", paseo_host(), "--filter", "text"],
+                timeout=30,
+                check=False,
+                env=os.environ.copy(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            warnings.append(f"unable to read Paseo agent {agent_id} logs: {exc}")
+            continue
+        if logs.returncode:
+            detail = logs.stderr.strip() or logs.stdout.strip() or "unknown error"
+            warnings.append(f"unable to read Paseo agent {agent_id} logs: {detail}")
+            continue
+        candidates = list(_json_objects(logs.stdout))
+        for candidate in reversed(candidates):
+            try:
+                validate_result(candidate, pr)
+            except (AutomationError, TypeError, ValueError):
+                continue
+            if (
+                candidate.get("published") is True
+                and isinstance(candidate.get("summary"), str)
+                and isinstance(candidate.get("findings"), list)
+                and isinstance(candidate.get("linear"), dict)
+            ):
+                return candidate, warnings
+    return None, warnings
 
 
 def invoke_codex(pr: PullRequest, *, run_id: str) -> dict[str, Any]:
@@ -432,7 +573,7 @@ def persist_verified(
     run_id: str,
     result: Mapping[str, Any],
     publications: Mapping[str, Sequence[Mapping[str, Any]]],
-) -> None:
+) -> bool:
     reviews = list(publications.get("reviews", []))
     comments = list(publications.get("comments", []))
     actual_event = None
@@ -444,12 +585,12 @@ def persist_verified(
         raise AutomationError("Codex completed without a new verifiable GitHub publication")
 
     with db:
-        db.execute(
+        updated = db.execute(
             """
             UPDATE review_runs
             SET completed_at = ?, status = 'published', event = ?, summary = ?,
                 structured_result = ?, error = NULL
-            WHERE id = ?
+            WHERE id = ? AND status = 'running'
             """,
             (
                 iso(utc_now()),
@@ -459,6 +600,16 @@ def persist_verified(
                 run_id,
             ),
         )
+        if updated.rowcount == 0:
+            existing = db.execute(
+                "SELECT status FROM review_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if existing and existing["status"] == "published":
+                return False
+            raise AutomationError(f"review run {run_id} is not recoverable")
+
+        db.execute("DELETE FROM review_findings WHERE run_id = ?", (run_id,))
+        db.execute("DELETE FROM linear_snapshots WHERE run_id = ?", (run_id,))
         for kind, items in (("review", reviews), ("inline_comment", comments)):
             for item in items:
                 db.execute(
@@ -514,6 +665,7 @@ def persist_verified(
                 json.dumps(linear.get("labels") or []),
             ),
         )
+    return True
 
 
 def mark_failed(db: sqlite3.Connection, run_id: str, error: str, result: Any = None) -> None:
@@ -532,6 +684,145 @@ def mark_failed(db: sqlite3.Connection, run_id: str, error: str, result: Any = N
     db.commit()
 
 
+def pull_request_from_run(row: Mapping[str, Any]) -> PullRequest:
+    return PullRequest(
+        url=str(row["pr_url"]),
+        repo=str(row["repo"]),
+        number=int(row["pr_number"]),
+        title=str(row["pr_title"]),
+        body="",
+        head_sha=str(row["head_sha"]),
+        base_ref=str(row["base_ref"]),
+        author_login=str(row["pr_author"]),
+    )
+
+
+def recovered_result_fallback(
+    pr: PullRequest,
+    publications: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, Any]:
+    reviews = list(publications.get("reviews", []))
+    comments = list(publications.get("comments", []))
+    event = "APPROVE" if any(
+        str(item.get("state") or "").upper() == "APPROVED" for item in reviews
+    ) else "COMMENT"
+    bodies = [
+        str(item.get("body") or "").strip()
+        for item in [*reviews, *comments]
+        if str(item.get("body") or "").strip()
+    ]
+    summary = bodies[0] if bodies else "GitHub publication recovered after an interrupted review run."
+    return {
+        "repo": pr.repo,
+        "pr_number": pr.number,
+        "head_sha": pr.head_sha,
+        "event": event,
+        "published": True,
+        "summary": summary,
+        "findings": [],
+        "linear": {
+            "fetch_status": "unavailable",
+            "key": None,
+            "title": None,
+            "url": None,
+            "status": None,
+            "project": None,
+            "product_summary": None,
+            "acceptance_criteria": [],
+            "labels": [],
+        },
+        "limitations": [
+            "Recovered from GitHub after the original automation process was interrupted; "
+            "structured Paseo output was unavailable."
+        ],
+    }
+
+
+def running_run_is_stale(row: Mapping[str, Any]) -> bool:
+    requested_at = datetime.fromisoformat(str(row["requested_at"]))
+    if requested_at.tzinfo is None:
+        requested_at = requested_at.replace(tzinfo=timezone.utc)
+    timeout_value = os.environ.get("REVIEW_PASEO_TIMEOUT", "45m")
+    stale_after = paseo_timeout_seconds(timeout_value) + 120
+    return (utc_now() - requested_at.astimezone(timezone.utc)).total_seconds() > stale_after
+
+
+def recover_running_run(
+    db: sqlite3.Connection,
+    row: Mapping[str, Any],
+    publications: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    pr = pull_request_from_run(row)
+    run_id = str(row["id"])
+    if not publication_ids(publications):
+        return {
+            "url": pr.url,
+            "status": "in_progress",
+            "head_sha": pr.head_sha,
+            "run_id": run_id,
+        }
+
+    agents, warnings = list_paseo_review_agents(run_id)
+    active_ids = [
+        str(agent.get("id") or "")
+        for agent in agents
+        if str(agent.get("status") or "").lower() == "running"
+    ]
+    if active_ids and not force:
+        return {
+            "url": pr.url,
+            "status": "in_progress",
+            "head_sha": pr.head_sha,
+            "run_id": run_id,
+            "publication_detected": True,
+        }
+    if warnings and not force:
+        return {
+            "url": pr.url,
+            "status": "in_progress",
+            "head_sha": pr.head_sha,
+            "run_id": run_id,
+            "recovery_warnings": warnings,
+        }
+
+    structured, log_warnings = load_paseo_structured_result(pr, agents)
+    warnings.extend(log_warnings)
+    if structured is None and agents and not force:
+        response: dict[str, Any] = {
+            "url": pr.url,
+            "status": "in_progress",
+            "head_sha": pr.head_sha,
+            "run_id": run_id,
+            "publication_detected": True,
+        }
+        if warnings:
+            response["recovery_warnings"] = warnings
+        return response
+    if structured is None:
+        structured = recovered_result_fallback(pr, publications)
+    persist_verified(db, run_id, structured, publications)
+    cleanup_warnings = cleanup_paseo_review_agent(run_id)
+    warnings.extend(cleanup_warnings)
+
+    persisted = db.execute(
+        "SELECT event, summary FROM review_runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    response: dict[str, Any] = {
+        "url": pr.url,
+        "status": "published",
+        "event": str(persisted["event"]),
+        "head_sha": pr.head_sha,
+        "run_id": run_id,
+        "summary": str(persisted["summary"]),
+        "recovered": True,
+    }
+    if warnings:
+        response["recovery_warnings"] = warnings
+    return response
+
+
 def review_one(
     db: sqlite3.Connection,
     url: str,
@@ -546,11 +837,53 @@ def review_one(
             "status": "skipped_self_review_not_authorized",
             "head_sha": pr.head_sha,
         }
-    if verified_run_exists(db, pr, login):
-        return {"url": pr.url, "status": "skipped_verified", "head_sha": pr.head_sha}
-
     before = github_publications(pr, login)
-    run_id = insert_run(db, pr, login, "running")
+    claim_state, run_id = claim_review_run(db, pr, login)
+    if claim_state == "published":
+        return {
+            "url": pr.url,
+            "status": "skipped_verified",
+            "head_sha": pr.head_sha,
+            "run_id": run_id,
+        }
+    if claim_state == "running":
+        running = db.execute(
+            "SELECT * FROM review_runs WHERE id = ?", (run_id,)
+        ).fetchone()
+        if running is None:
+            raise AutomationError(f"claimed review run disappeared: {run_id}")
+        if publication_ids(before):
+            return recover_running_run(
+                db,
+                running,
+                before,
+                force=running_run_is_stale(running),
+            )
+        if not running_run_is_stale(running):
+            return {
+                "url": pr.url,
+                "status": "in_progress",
+                "head_sha": pr.head_sha,
+                "run_id": run_id,
+            }
+
+        mark_failed(
+            db,
+            run_id,
+            "Interrupted review exceeded its Paseo timeout without a GitHub publication.",
+        )
+        cleanup_warnings = cleanup_paseo_review_agent(run_id)
+        if cleanup_warnings:
+            print("; ".join(cleanup_warnings), file=sys.stderr)
+        claim_state, run_id = claim_review_run(db, pr, login)
+        if claim_state != "claimed":
+            return {
+                "url": pr.url,
+                "status": "in_progress" if claim_state == "running" else "skipped_verified",
+                "head_sha": pr.head_sha,
+                "run_id": run_id,
+            }
+
     if publication_ids(before):
         finish_skipped(
             db,
@@ -562,6 +895,7 @@ def review_one(
             "url": pr.url,
             "status": "skipped_existing_publication",
             "head_sha": pr.head_sha,
+            "run_id": run_id,
         }
 
     structured: dict[str, Any] | None = None
@@ -637,7 +971,71 @@ def review_urls(
         "reviewer": login,
         "requested": len(unique_urls),
         "published": sum(item["status"] == "published" for item in results),
+        "in_progress": sum(item["status"] == "in_progress" for item in results),
         "failed": sum(item["status"] == "failed" for item in results),
+        "results": results,
+    }
+
+
+def recover_run_ids(
+    run_ids: Iterable[str],
+    db_path: str | None = None,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    unique_ids = list(
+        dict.fromkeys(run_id.strip() for run_id in run_ids if run_id.strip())
+    )
+    if not unique_ids:
+        raise AutomationError("at least one review run ID is required")
+    login = reviewer_login()
+    results: list[dict[str, Any]] = []
+    with connect_db(db_path) as db:
+        for run_id in unique_ids:
+            row = db.execute(
+                "SELECT * FROM review_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                results.append({"run_id": run_id, "status": "not_found"})
+                continue
+            if str(row["reviewer_login"]).lower() != login.lower():
+                results.append(
+                    {
+                        "run_id": run_id,
+                        "status": "reviewer_mismatch",
+                        "reviewer": str(row["reviewer_login"]),
+                    }
+                )
+                continue
+            if str(row["status"]) == "published":
+                results.append(
+                    {
+                        "run_id": run_id,
+                        "url": str(row["pr_url"]),
+                        "head_sha": str(row["head_sha"]),
+                        "status": "skipped_verified",
+                    }
+                )
+                continue
+            if str(row["status"]) != "running":
+                results.append(
+                    {
+                        "run_id": run_id,
+                        "url": str(row["pr_url"]),
+                        "head_sha": str(row["head_sha"]),
+                        "status": "not_recoverable",
+                        "current_status": str(row["status"]),
+                    }
+                )
+                continue
+            pr = pull_request_from_run(row)
+            publications = github_publications(pr, login)
+            results.append(recover_running_run(db, row, publications, force=force))
+    return {
+        "reviewer": login,
+        "requested": len(unique_ids),
+        "published": sum(item["status"] == "published" for item in results),
+        "in_progress": sum(item["status"] == "in_progress" for item in results),
         "results": results,
     }
 
@@ -723,6 +1121,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="allow PRs authored by the authenticated GitHub user",
     )
     review.add_argument("urls", nargs="+")
+    recover = subparsers.add_parser(
+        "recover", help="reconcile interrupted review runs and clean their Paseo agents"
+    )
+    recover.add_argument(
+        "--force",
+        action="store_true",
+        help="recover a published review even if Paseo still reports its agent as running",
+    )
+    recover.add_argument("run_ids", nargs="+")
     digest = subparsers.add_parser("digest-source", help="emit verified review data for a digest")
     digest.add_argument("--hours", type=int, default=24)
     digest.add_argument("--timezone", default=os.environ.get("TZ", "America/Mexico_City"))
@@ -744,6 +1151,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     allow_self_review=args.allow_self_review,
                 )
             )
+        elif args.command == "recover":
+            emit(recover_run_ids(args.run_ids, args.db, force=args.force))
         elif args.command == "digest-source":
             emit(digest_source(args.db, hours=args.hours, timezone_name=args.timezone))
         return 0

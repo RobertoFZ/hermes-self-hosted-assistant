@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help init bootstrap build up down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status auth-linear check-tool-updates paseo-up paseo-status paseo-logs paseo-register-workspace paseo-pair paseo-provider-status auth-github gateway-setup sync-skills sync-crons cron-status digest-preview review-history-init install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
+.PHONY: help init bootstrap build up down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status auth-linear check-tool-updates paseo-up paseo-status paseo-logs paseo-register-workspace paseo-pair paseo-provider-status auth-github gateway-setup sync-skills sync-crons cron-status digest-preview review-history-init review-recover install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
 
 help: ## Show the available commands
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -98,6 +98,12 @@ cron-status: ## List the active Hermes cron jobs
 review-history-init: ## Initialize or migrate the persisted review database
 	docker compose exec -T --user hermes hermes \
 		python3 /opt/review-automation/review_automation.py init
+
+review-recover: ## Recover an interrupted review (RUN_ID=UUID, optional FORCE=1)
+	@test -n "$(RUN_ID)" || { echo "Usage: make review-recover RUN_ID=UUID [FORCE=1]" >&2; exit 2; }
+	docker compose exec -T --user hermes hermes \
+		python3 /opt/review-automation/review_automation.py recover \
+		$(if $(filter 1 true yes,$(FORCE)),--force,) "$(RUN_ID)"
 
 digest-preview: ## Show the verified previous-24-hours digest source as JSON
 	docker compose exec -T --user hermes hermes /bin/sh -eu -c \

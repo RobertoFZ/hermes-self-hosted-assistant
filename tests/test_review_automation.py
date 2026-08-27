@@ -191,13 +191,25 @@ class ReviewAutomationTests(unittest.TestCase):
             ),
             stderr="",
         )
-        deleted = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="{}", stderr=""
+        deleted_one = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({"deletedCount": 1, "agentIds": ["agent-one"]}),
+            stderr="",
+        )
+        deleted_two = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({"deletedCount": 1, "agentIds": ["agent-two"]}),
+            stderr="",
+        )
+        verified_empty = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="[]", stderr=""
         )
         with patch.dict(os.environ, {"PASEO_HOST": "paseo:6767"}), patch.object(
             automation,
             "run",
-            side_effect=[listed, deleted, deleted],
+            side_effect=[listed, deleted_one, deleted_two, verified_empty],
         ) as run_command:
             warnings = automation.cleanup_paseo_review_agent("run-123")
 
@@ -231,6 +243,205 @@ class ReviewAutomationTests(unittest.TestCase):
             run_command.call_args_list[2].args[0][-1],
             "agent-two",
         )
+        self.assertEqual(run_command.call_args_list[3].args[0][1], "ls")
+
+    def test_cleanup_rejects_zero_delete_count_even_on_success_exit(self):
+        listed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps([{"id": "agent-one", "status": "closed"}]),
+            stderr="",
+        )
+        not_deleted = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({"deletedCount": 0, "agentIds": []}),
+            stderr="Warning: Failed to delete agent",
+        )
+        with patch.object(
+            automation,
+            "run",
+            side_effect=[listed, not_deleted, listed],
+        ):
+            warnings = automation.cleanup_paseo_review_agent("run-123")
+
+        self.assertTrue(any("did not confirm hard deletion" in item for item in warnings))
+        self.assertTrue(any("still exists after deletion" in item for item in warnings))
+
+    def test_duplicate_request_returns_in_progress_without_second_agent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/12",
+                repo="acme/api",
+                number=12,
+                title="In-flight review",
+                body="",
+                head_sha="f" * 40,
+                base_ref="main",
+                author_login="developer",
+            )
+            with automation.connect_db(database) as db:
+                run_id = automation.insert_run(db, pr, "review-bot", "running")
+                with patch.object(automation, "load_pr", return_value=pr), patch.object(
+                    automation,
+                    "github_publications",
+                    return_value={"reviews": [], "comments": []},
+                ), patch.object(automation, "invoke_codex") as invoke_codex:
+                    result = automation.review_one(db, pr.url, "review-bot")
+                count = db.execute(
+                    "SELECT COUNT(*) FROM review_runs WHERE head_sha = ?",
+                    (pr.head_sha,),
+                ).fetchone()[0]
+
+        self.assertEqual(result["status"], "in_progress")
+        self.assertEqual(result["run_id"], run_id)
+        self.assertEqual(count, 1)
+        invoke_codex.assert_not_called()
+
+    def test_interrupted_run_recovers_publication_and_structured_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/13",
+                repo="acme/api",
+                number=13,
+                title="Recover review",
+                body="",
+                head_sha="1" * 40,
+                base_ref="main",
+                author_login="developer",
+            )
+            publications = {
+                "reviews": [
+                    {
+                        "id": 313,
+                        "state": "COMMENTED",
+                        "body": "Recovered review",
+                        "html_url": "https://github.com/acme/api/pull/13#review-313",
+                        "submitted_at": "2026-08-27T15:55:00Z",
+                    }
+                ],
+                "comments": [],
+            }
+            structured = {
+                "repo": pr.repo,
+                "pr_number": pr.number,
+                "head_sha": pr.head_sha,
+                "event": "COMMENT",
+                "published": True,
+                "summary": "Recovered complete structured output.",
+                "findings": [
+                    {
+                        "category": "correctness",
+                        "severity": "high",
+                        "path": "app.py",
+                        "line": 13,
+                        "body": "The interrupted finding is retained.",
+                        "blocking": True,
+                    }
+                ],
+                "linear": {
+                    "fetch_status": "available",
+                    "key": "REV-13",
+                    "title": "Recovery",
+                    "url": "https://linear.app/acme/issue/REV-13",
+                    "status": "In Review",
+                    "project": "Reliability",
+                    "product_summary": "Recover interrupted reviews.",
+                    "acceptance_criteria": ["Review is retained"],
+                    "labels": ["reliability"],
+                },
+                "limitations": [],
+            }
+            with automation.connect_db(database) as db:
+                run_id = automation.insert_run(db, pr, "review-bot", "running")
+                with patch.object(automation, "load_pr", return_value=pr), patch.object(
+                    automation,
+                    "github_publications",
+                    return_value=publications,
+                ), patch.object(
+                    automation,
+                    "list_paseo_review_agents",
+                    return_value=([{"id": "agent-13", "status": "closed"}], []),
+                ), patch.object(
+                    automation,
+                    "load_paseo_structured_result",
+                    return_value=(structured, []),
+                ), patch.object(
+                    automation,
+                    "cleanup_paseo_review_agent",
+                    return_value=[],
+                ) as cleanup_agent, patch.object(
+                    automation, "invoke_codex"
+                ) as invoke_codex:
+                    result = automation.review_one(db, pr.url, "review-bot")
+                saved = db.execute(
+                    "SELECT status, event, summary FROM review_runs WHERE id = ?",
+                    (run_id,),
+                ).fetchone()
+                finding_count = db.execute(
+                    "SELECT COUNT(*) FROM review_findings WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()[0]
+
+        self.assertEqual(result["status"], "published")
+        self.assertTrue(result["recovered"])
+        self.assertEqual(saved["status"], "published")
+        self.assertEqual(saved["event"], "COMMENT")
+        self.assertEqual(saved["summary"], structured["summary"])
+        self.assertEqual(finding_count, 1)
+        cleanup_agent.assert_called_once_with(run_id)
+        invoke_codex.assert_not_called()
+
+    def test_recovery_waits_for_structured_output_before_deleting_agent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/15",
+                repo="acme/api",
+                number=15,
+                title="Wait for terminal output",
+                body="",
+                head_sha="3" * 40,
+                base_ref="main",
+                author_login="developer",
+            )
+            publications = {
+                "reviews": [
+                    {
+                        "id": 315,
+                        "state": "COMMENTED",
+                        "body": "Publication arrived before terminal output.",
+                    }
+                ],
+                "comments": [],
+            }
+            with automation.connect_db(database) as db:
+                run_id = automation.insert_run(db, pr, "review-bot", "running")
+                row = db.execute(
+                    "SELECT * FROM review_runs WHERE id = ?", (run_id,)
+                ).fetchone()
+                with patch.object(
+                    automation,
+                    "list_paseo_review_agents",
+                    return_value=([{"id": "agent-15", "status": "idle"}], []),
+                ), patch.object(
+                    automation,
+                    "load_paseo_structured_result",
+                    return_value=(None, []),
+                ), patch.object(
+                    automation, "cleanup_paseo_review_agent"
+                ) as cleanup_agent:
+                    result = automation.recover_running_run(db, row, publications)
+                status = db.execute(
+                    "SELECT status FROM review_runs WHERE id = ?", (run_id,)
+                ).fetchone()[0]
+
+        self.assertEqual(result["status"], "in_progress")
+        self.assertTrue(result["publication_detected"])
+        self.assertEqual(status, "running")
+        cleanup_agent.assert_not_called()
 
     def test_invoke_codex_labels_the_review_agent(self):
         pr = automation.PullRequest(
@@ -260,6 +471,42 @@ class ReviewAutomationTests(unittest.TestCase):
         command = run_command.call_args.args[0]
         label_index = command.index("--label")
         self.assertEqual(command[label_index + 1], "hermes-review-run=run-456")
+
+    def test_structured_result_can_be_recovered_from_paseo_logs(self):
+        pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/14",
+            repo="acme/api",
+            number=14,
+            title="Log recovery",
+            body="",
+            head_sha="2" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        structured = {
+            "repo": pr.repo,
+            "pr_number": pr.number,
+            "head_sha": pr.head_sha,
+            "event": "COMMENT",
+            "published": True,
+            "summary": "Recovered from the final assistant message.",
+            "findings": [],
+            "linear": {"fetch_status": "unavailable"},
+            "limitations": [],
+        }
+        logs = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="Assistant final output:\n" + json.dumps(structured),
+            stderr="",
+        )
+        with patch.object(automation, "run", return_value=logs):
+            recovered, warnings = automation.load_paseo_structured_result(
+                pr, [{"id": "agent-14", "status": "closed"}]
+            )
+
+        self.assertEqual(recovered, structured)
+        self.assertEqual(warnings, [])
 
 
 if __name__ == "__main__":
