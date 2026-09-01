@@ -83,6 +83,63 @@ class ReviewAutomationTests(unittest.TestCase):
             with self.assertRaises(automation.AutomationError):
                 automation.parse_pr_url("https://github.com/acme/api/pull/42/files")
 
+    def test_repositioned_inline_comment_does_not_cover_current_head(self):
+        previous_head = "4a41d961a916b539c270c31dd63645e5338a2ceb"
+        current_head = "2ecaead28c4e094ea4650f212a03e11be14d92e5"
+        pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/219",
+            repo="acme/api",
+            number=219,
+            title="Update pricing rules",
+            body="",
+            head_sha=current_head,
+            base_ref="main",
+            author_login="developer",
+        )
+        reviews = [
+            {
+                "id": 101,
+                "user": {"login": "review-bot"},
+                "commit_id": current_head,
+                "state": "COMMENTED",
+            },
+            {
+                "id": 102,
+                "user": {"login": "review-bot"},
+                "commit_id": previous_head,
+                "state": "APPROVED",
+            },
+        ]
+        comments = [
+            {
+                "id": 201,
+                "user": {"login": "review-bot"},
+                "commit_id": current_head,
+                "original_commit_id": previous_head,
+            },
+            {
+                "id": 202,
+                "user": {"login": "review-bot"},
+                "commit_id": current_head,
+                "original_commit_id": current_head,
+            },
+            {
+                "id": 203,
+                "user": {"login": "review-bot"},
+                "commit_id": current_head,
+            },
+        ]
+
+        with patch.object(
+            automation,
+            "gh_paginated",
+            side_effect=[reviews, comments],
+        ):
+            publications = automation.github_publications(pr, "review-bot")
+
+        self.assertEqual([item["id"] for item in publications["reviews"]], [101])
+        self.assertEqual([item["id"] for item in publications["comments"]], [202])
+
     def test_verified_review_is_idempotent_and_available_to_digest(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "reviews.sqlite3"

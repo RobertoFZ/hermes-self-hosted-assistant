@@ -156,11 +156,14 @@ def github_publications(pr: PullRequest, login: str) -> dict[str, list[dict[str,
             and str(item.get("commit_id") or "") == pr.head_sha
             and str(item.get("state") or "").upper() in {"APPROVED", "COMMENTED"}
         ],
+        # GitHub can retarget commit_id when an old inline comment still maps to
+        # the new diff. original_commit_id identifies the revision it reviewed.
         "comments": [
             item
             for item in comments
             if str((item.get("user") or {}).get("login") or "").lower() == normalized_login
             and str(item.get("commit_id") or "") == pr.head_sha
+            and str(item.get("original_commit_id") or "") == pr.head_sha
         ],
     }
 
