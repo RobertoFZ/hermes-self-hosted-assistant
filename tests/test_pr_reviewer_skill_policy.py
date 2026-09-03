@@ -15,6 +15,9 @@ GH_RUNBOOK = (
 SEVERITY_RUBRIC = (
     ROOT / "skills" / "pr-reviewer" / "references" / "severity-rubric.md"
 ).read_text(encoding="utf-8")
+LOCAL_WORKFLOW = (
+    ROOT / "skills" / "pr-reviewer" / "references" / "local-branch-workflow.md"
+).read_text(encoding="utf-8")
 
 
 class PRReviewerSkillPolicyTests(unittest.TestCase):
@@ -62,6 +65,25 @@ class PRReviewerSkillPolicyTests(unittest.TestCase):
         self.assertIn(expected, WORKFLOW)
         self.assertIn(expected, GH_RUNBOOK)
         self.assertIn('self-authored PR always emits `"event": "COMMENT"`', WORKFLOW)
+
+    def test_clean_feature_branch_with_committed_diff_is_reviewed(self):
+        self.assertIn(
+            "A clean working tree does not mean there is nothing to review",
+            LOCAL_WORKFLOW,
+        )
+        self.assertIn(
+            "aggregate diff from the merge base is non-empty",
+            LOCAL_WORKFLOW,
+        )
+        self.assertNotIn(
+            "If\n the tree is clean there is nothing to review",
+            LOCAL_WORKFLOW,
+        )
+
+    def test_local_review_returns_stable_structured_handoff(self):
+        self.assertIn("structured `pre_pr_review` handoff", LOCAL_WORKFLOW)
+        self.assertIn("reviewed_head: <HEAD SHA from the stable snapshot>", LOCAL_WORKFLOW)
+        self.assertIn("discard the result and restart", LOCAL_WORKFLOW)
 
 
 if __name__ == "__main__":

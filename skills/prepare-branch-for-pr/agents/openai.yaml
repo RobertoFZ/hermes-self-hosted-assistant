@@ -1,0 +1,4 @@
+interface:
+  display_name: "Prepare Branch for PR"
+  short_description: "Review, verify, and finalize a branch for PR"
+  default_prompt: "Use $prepare-branch-for-pr to verify and review my current branch, then prepare it for pull-request publication."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ticket OpenSpec Planning"
+  short_description: "Turn a ticket into an approved OpenSpec plan"
+  default_prompt: "Use $ticket-openspec-planning to analyze this ticket and prepare an implementation-ready OpenSpec plan."

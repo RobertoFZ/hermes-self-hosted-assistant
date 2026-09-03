@@ -1,0 +1,4 @@
+interface:
+  display_name: "Linear Ticket Selection"
+  short_description: "Find and select actionable Linear tickets"
+  default_prompt: "Use $linear-ticket-selection to list my actionable assigned Linear tickets and help me choose a subset."

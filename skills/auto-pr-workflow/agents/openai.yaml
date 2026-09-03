@@ -1,0 +1,4 @@
+interface:
+  display_name: "Auto PR Workflow"
+  short_description: "OpenSpec tickets through PR merge and safe cleanup"
+  default_prompt: "Use $auto-pr-workflow to take a selected Linear ticket through reviewed PR creation, or merge its PR and safely clean its feature worktrees."

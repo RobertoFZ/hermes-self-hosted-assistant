@@ -430,15 +430,19 @@ make verify               # verify auth, skill, plugin, and workspace
 make test                 # local policy and skill tests
 ```
 
-The repository copy is canonical. To use it as the current user's global Codex
-skill as well:
+The repository copies are canonical. To install the Auto-PR workflow phases and
+`pr-reviewer` as the current user's global Codex skills:
 
 ```bash
 make install-global-skill
 ```
 
-If a global `pr-reviewer` directory already exists, the installer preserves it
-with a timestamped backup before creating the symlink.
+For every workflow skill, the installer preserves an existing non-matching
+global installation with a timestamped backup before creating the symlink.
+Restart Codex afterward so it refreshes the discovered skill catalog. Target
+repositories must still provide the repository-specific `bootstrap`, OpenSpec,
+git-workflow, and safe-worktree-cleaning skills checked by Auto-PR's dependency
+preflight.
 
 ## Web dashboard
 

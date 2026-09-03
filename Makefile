@@ -119,7 +119,7 @@ digest-preview: ## Show the verified previous-24-hours digest source as JSON
 	docker compose exec -T --user hermes hermes /bin/sh -eu -c \
 		'python3 /opt/review-automation/review_automation.py digest-source --hours 24 --timezone "$${TZ:-America/Mexico_City}"'
 
-install-global-skill: ## Link the repository skill into the local Codex skill directory
+install-global-skill: ## Link the Auto-PR workflow bundle into the local Codex skill directory
 	./scripts/install-global-skill.sh
 
 apply-review-policy: ## Persist the configured review-only Slack policy

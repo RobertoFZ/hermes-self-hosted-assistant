@@ -1,0 +1,4 @@
+interface:
+  display_name: "Publish Ready PR"
+  short_description: "Publish a verified branch as a pull request"
+  default_prompt: "Use $publish-ready-pr to publish this verified branch as a correctly configured pull request."

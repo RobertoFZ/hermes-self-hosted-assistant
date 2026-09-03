@@ -1,0 +1,4 @@
+interface:
+  display_name: "Merge PR and Clean Worktree"
+  short_description: "Safely merge a PR and clean its worktree"
+  default_prompt: "Use $merge-pr-and-clean-worktree to verify and merge this pull request, then safely clean its feature worktree."

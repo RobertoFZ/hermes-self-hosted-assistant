@@ -86,9 +86,17 @@ Record:
 - changed files, additions/deletions, commits ahead/behind;
 - whether the branch exceeds 20 files or roughly 500 changed lines.
 
-If the current branch is the protected base, report the workflow violation. If
-the tree is clean there is nothing to review; if it is dirty, review the local
-changes but mark branch creation as required before PR readiness.
+If the current branch is the protected base, report the workflow violation and
+require a feature branch before PR readiness.
+
+A clean working tree does not mean there is nothing to review. When the
+aggregate diff from the merge base is non-empty, review its committed branch
+changes normally. There is nothing to review only when the aggregate tracked
+diff, staged and unstaged changes, and in-scope untracked files are all empty.
+
+If a feature branch is dirty, review the complete effective change but return
+`NOT_READY` until the intended changes are committed and the working tree is
+clean.
 
 Do not rerun snapshot commands after starting the review without first checking
 whether HEAD or `git status --short` changed. If they changed, tell the user the
@@ -180,7 +188,7 @@ gate passed, not that CI is green. State the unrun validations explicitly.
 
 ## 7. Output contract
 
-Return:
+Return the report and a structured `pre_pr_review` handoff:
 
 1. verdict and one-sentence reason;
 2. snapshot: repository, branch, base, merge-base/HEAD, dirty state, size;
@@ -190,6 +198,23 @@ Return:
 5. validation run/pass/fail/not-run;
 6. cross-repo or coordinated-branch dependencies;
 7. concise next actions before PR creation.
+
+```yaml
+pre_pr_review:
+  verdict: READY_FOR_PR | READY_WITH_COMMENTS | NOT_READY
+  reviewed_head: <HEAD SHA from the stable snapshot>
+  merge_base: <merge-base SHA>
+  dirty: false
+  blocking_findings: 0
+  non_blocking_findings: []
+  validation:
+    status: passed | failed | not_run
+    commands: []
+```
+
+Set `reviewed_head` only from the snapshot actually reviewed. If HEAD or the
+working-tree state changes during review, discard the result and restart before
+returning this handoff.
 
 Do not emit `APPROVE`/`COMMENT` events and do not use the GitHub dry-run JSON
 contract for local mode.
