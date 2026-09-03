@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Self Review"
+  short_description: "Review branch diffs before commits and PRs"
+  default_prompt: "Use $codex-self-review to review the current branch against its base before creating a pull request."

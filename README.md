@@ -64,7 +64,7 @@ Important runtime locations:
 | Review workspace | `/opt/data/repos/reserhub-revenue-full` | Never |
 | Verified review history | `/opt/data/review-history/reviews.sqlite3` | Never |
 | Managed Hermes cron IDs | `/opt/data/cron/repository-managed-jobs.json` | Never |
-| Codex review skill | `skills/pr-reviewer` | Yes |
+| Codex Auto-PR and review skills | `skills/{auto-pr-workflow,...}` | Yes |
 | Codex plugin marketplace | `.agents/plugins/marketplace.json` | Yes |
 | Hermes orchestration skills | `skills/codex-pr-review`, `skills/review-digest` | Yes |
 | Cron source of truth | `config/crons.json` | Yes |
@@ -127,7 +127,7 @@ make sync-crons
 ```
 
 The derived image installs pinned standalone Codex (`0.149.1` by default), its
-Linux `bubblewrap` sandbox prerequisite, OpenSpec (`1.6.0`), and Paseo (`0.5.2`).
+Linux `bubblewrap` sandbox prerequisite, OpenSpec (`1.10.0`), and Paseo (`0.5.2`).
 Override `CODEX_VERSION`, `OPENSPEC_VERSION`, or `PASEO_VERSION` only after
 validating the new version.
 
@@ -431,7 +431,8 @@ make test                 # local policy and skill tests
 ```
 
 The repository copies are canonical. To install the Auto-PR workflow phases and
-`pr-reviewer` as the current user's global Codex skills:
+`codex-self-review`, and `pr-reviewer` as the current user's global Codex
+skills:
 
 ```bash
 make install-global-skill
@@ -443,6 +444,17 @@ Restart Codex afterward so it refreshes the discovered skill catalog. Target
 repositories must still provide the repository-specific `bootstrap`, OpenSpec,
 git-workflow, and safe-worktree-cleaning skills checked by Auto-PR's dependency
 preflight.
+
+The same workflow bundle is bind-mounted read-only into Paseo's Codex skill
+root on the VPS. After changing the OpenSpec pin or any image-installed tool,
+rebuild before restarting:
+
+```bash
+git pull --ff-only origin main
+make build
+make restart
+make verify
+```
 
 ## Web dashboard
 

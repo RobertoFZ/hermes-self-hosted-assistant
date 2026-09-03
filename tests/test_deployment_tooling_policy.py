@@ -110,24 +110,34 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn('path.name.startswith("gstack-")', REMOVE_GSTACK)
         self.assertIn("remove_gstack.py --check", VERIFY)
 
-    def test_tool_update_check_is_read_only_and_checks_both_npm_packages(self):
+    def test_tool_update_check_is_read_only_and_checks_all_npm_packages(self):
         self.assertIn("check-tool-updates: ##", MAKEFILE)
         self.assertIn('npm view --silent "@openai/codex" dist-tags.latest', UPDATE_CHECK)
         self.assertIn(
             'npm view --silent "@getpaseo/cli" dist-tags.latest', UPDATE_CHECK
         )
+        self.assertIn(
+            'npm view --silent "@fission-ai/openspec" dist-tags.latest', UPDATE_CHECK
+        )
         self.assertIn("codex --version", UPDATE_CHECK)
+        self.assertIn("openspec --version", UPDATE_CHECK)
         self.assertIn("paseo --version", UPDATE_CHECK)
         self.assertNotIn("npm install", UPDATE_CHECK)
 
     def test_openspec_is_pinned_in_the_image(self):
-        self.assertIn("ARG OPENSPEC_VERSION=1.6.0", DOCKERFILE)
+        self.assertIn("ARG OPENSPEC_VERSION=1.10.0", DOCKERFILE)
         self.assertIn('@fission-ai/openspec@${OPENSPEC_VERSION}', DOCKERFILE)
         self.assertIn("--ignore-scripts", DOCKERFILE)
-        self.assertIn('OPENSPEC_VERSION: "${OPENSPEC_VERSION:-1.6.0}"', COMPOSE)
+        self.assertIn('OPENSPEC_VERSION: "${OPENSPEC_VERSION:-1.10.0}"', COMPOSE)
 
     def test_runtime_verification_checks_the_openspec_version(self):
         self.assertIn('test "$(openspec --version)" = "$OPENSPEC_VERSION"', VERIFY)
+        self.assertIn(
+            '(cd "$REVIEW_MONOREPO_ROOT" && openspec context --json >/dev/null)',
+            VERIFY,
+        )
+        self.assertIn("openspec-propose openspec-apply-change", VERIFY)
+        self.assertIn('generatedBy: \\"$OPENSPEC_VERSION\\"', VERIFY)
 
     def test_paseo_is_pinned_in_the_image(self):
         self.assertIn("ARG PASEO_VERSION=0.5.2", DOCKERFILE)
@@ -147,8 +157,23 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn('"voiceMode": {', PASEO_CONFIG)
         self.assertGreaterEqual(PASEO_CONFIG.count('"enabled": false'), 2)
 
-    def test_pr_reviewer_is_codex_only_and_hermes_has_orchestration_skills(self):
-        self.assertIn("target: /opt/data/.agents/skills/pr-reviewer", COMPOSE)
+    def test_auto_pr_bundle_is_codex_only_and_hermes_has_orchestration_skills(self):
+        for skill_name in (
+            "auto-pr-workflow",
+            "linear-ticket-selection",
+            "ticket-openspec-planning",
+            "prepare-branch-for-pr",
+            "publish-ready-pr",
+            "merge-pr-and-clean-worktree",
+            "codex-self-review",
+            "pr-reviewer",
+        ):
+            self.assertIn(
+                f"target: /opt/data/.agents/skills/{skill_name}", COMPOSE
+            )
+            self.assertIn(
+                f'\"/opt/data/.agents/skills/$skill_name/SKILL.md\"', VERIFY
+            )
         self.assertNotIn("target: /opt/global-skills/pr-reviewer", COMPOSE)
         self.assertIn("target: /opt/global-skills/codex-pr-review", COMPOSE)
         self.assertIn("target: /opt/global-skills/review-digest", COMPOSE)

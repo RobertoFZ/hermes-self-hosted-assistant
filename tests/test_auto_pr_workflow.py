@@ -23,6 +23,7 @@ WORKFLOW_SKILLS = (
     "prepare-branch-for-pr",
     "publish-ready-pr",
     "merge-pr-and-clean-worktree",
+    "codex-self-review",
     "pr-reviewer",
 )
 

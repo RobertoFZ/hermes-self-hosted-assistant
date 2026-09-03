@@ -24,19 +24,26 @@ docker compose exec -T --user hermes paseo \
 
     codex_installed="$(codex --version)"
     codex_installed="${codex_installed#codex-cli }"
+    openspec_installed="$(openspec --version)"
     paseo_installed="$(paseo --version)"
     codex_latest="$(npm view --silent "@openai/codex" dist-tags.latest)"
+    openspec_latest="$(npm view --silent "@fission-ai/openspec" dist-tags.latest)"
     paseo_latest="$(npm view --silent "@getpaseo/cli" dist-tags.latest)"
 
     test -n "$codex_installed"
+    test -n "$openspec_installed"
     test -n "$paseo_installed"
     test -n "$codex_latest"
+    test -n "$openspec_latest"
     test -n "$paseo_latest"
 
     printf "%-10s %-14s %-14s %s\n" "TOOL" "INSTALLED" "LATEST" "STATUS"
     printf "%-10s %-14s %-14s %s\n" \
       "Codex" "$codex_installed" "$codex_latest" \
       "$(version_status "$codex_installed" "$codex_latest")"
+    printf "%-10s %-14s %-14s %s\n" \
+      "OpenSpec" "$openspec_installed" "$openspec_latest" \
+      "$(version_status "$openspec_installed" "$openspec_latest")"
     printf "%-10s %-14s %-14s %s\n" \
       "Paseo" "$paseo_installed" "$paseo_latest" \
       "$(version_status "$paseo_installed" "$paseo_latest")"

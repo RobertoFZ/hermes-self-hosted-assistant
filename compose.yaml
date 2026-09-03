@@ -5,7 +5,7 @@ x-hermes-runtime: &hermes-runtime
       args:
         HERMES_BASE_IMAGE: "${HERMES_BASE_IMAGE:-nousresearch/hermes-agent:latest}"
         CODEX_VERSION: "${CODEX_VERSION:-0.149.1}"
-        OPENSPEC_VERSION: "${OPENSPEC_VERSION:-1.6.0}"
+        OPENSPEC_VERSION: "${OPENSPEC_VERSION:-1.10.0}"
         PASEO_VERSION: "${PASEO_VERSION:-0.5.2}"
     image: "${HERMES_LOCAL_IMAGE:-hermes-self-hosted-assistant:local}"
 
@@ -130,6 +130,34 @@ services:
       - type: bind
         source: ./.agents
         target: /opt/self-assistant-marketplace/.agents
+        read_only: true
+      - type: bind
+        source: ./skills/auto-pr-workflow
+        target: /opt/data/.agents/skills/auto-pr-workflow
+        read_only: true
+      - type: bind
+        source: ./skills/linear-ticket-selection
+        target: /opt/data/.agents/skills/linear-ticket-selection
+        read_only: true
+      - type: bind
+        source: ./skills/ticket-openspec-planning
+        target: /opt/data/.agents/skills/ticket-openspec-planning
+        read_only: true
+      - type: bind
+        source: ./skills/prepare-branch-for-pr
+        target: /opt/data/.agents/skills/prepare-branch-for-pr
+        read_only: true
+      - type: bind
+        source: ./skills/publish-ready-pr
+        target: /opt/data/.agents/skills/publish-ready-pr
+        read_only: true
+      - type: bind
+        source: ./skills/merge-pr-and-clean-worktree
+        target: /opt/data/.agents/skills/merge-pr-and-clean-worktree
+        read_only: true
+      - type: bind
+        source: ./skills/codex-self-review
+        target: /opt/data/.agents/skills/codex-self-review
         read_only: true
       - type: bind
         source: ./skills/pr-reviewer

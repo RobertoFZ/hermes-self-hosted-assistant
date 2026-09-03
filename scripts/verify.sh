@@ -46,11 +46,33 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
     --mount "type=bind,src=$REVIEW_MONOREPO_ROOT,dst=/workspace,readonly" \
     alpine:3.22 test -f /workspace/README.md
   test "$(paseo --version)" = "$PASEO_VERSION"
+  test "$(openspec --version)" = "$OPENSPEC_VERSION"
+  (cd "$REVIEW_MONOREPO_ROOT" && openspec context --json >/dev/null)
   codex login status
   curl --fail --silent --show-error http://127.0.0.1:6767/api/health >/dev/null
   paseo provider diagnostic --host 127.0.0.1:6767 --json codex >/dev/null
   paseo project ls --host 127.0.0.1:6767 --json | grep -F "$REVIEW_MONOREPO_ROOT" >/dev/null
-  test -f /opt/data/.agents/skills/pr-reviewer/SKILL.md
+  for skill_name in \
+    auto-pr-workflow \
+    linear-ticket-selection \
+    ticket-openspec-planning \
+    prepare-branch-for-pr \
+    publish-ready-pr \
+    merge-pr-and-clean-worktree \
+    codex-self-review \
+    pr-reviewer
+  do
+    test -f "/opt/data/.agents/skills/$skill_name/SKILL.md"
+  done
+  for skill_name in openspec-propose openspec-apply-change
+  do
+    skill_file="$REVIEW_MONOREPO_ROOT/.agents/skills/$skill_name/SKILL.md"
+    if [ ! -f "$skill_file" ]; then
+      skill_file="$REVIEW_MONOREPO_ROOT/.codex/skills/$skill_name/SKILL.md"
+    fi
+    test -f "$skill_file"
+    grep -F "generatedBy: \"$OPENSPEC_VERSION\"" "$skill_file" >/dev/null
+  done
   test -f /opt/self-assistant-marketplace/.agents/plugins/marketplace.json
   codex plugin list --json | python3 -c "import json,sys; items=json.load(sys.stdin).get(\"installed\", []); desired=[x for x in items if x.get(\"pluginId\") == \"compound-engineering@self-assistant\" and x.get(\"version\") == \"3.24.0\" and x.get(\"enabled\") is True]; conflicts=[x for x in items if x.get(\"name\") == \"compound-engineering\" and x.get(\"pluginId\") != \"compound-engineering@self-assistant\" and x.get(\"enabled\") is True]; sys.exit(0 if len(desired) == 1 and not conflicts else \"Compound Engineering 3.24.0 is missing, disabled, or duplicated\")"
   codex mcp get linear | grep -F "https://mcp.linear.app/mcp/readonly" >/dev/null
@@ -59,4 +81,4 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   ! printf "%s\n" "$linear_status" | grep -F "Not logged in" >/dev/null
 '
 
-echo "Hermes orchestration, Codex pr-reviewer, Paseo, GitHub verification, review history, digest cron, plugin, and workspace are ready."
+echo "Hermes orchestration, Codex Auto-PR workflow, Paseo, GitHub verification, review history, digest cron, plugin, and workspace are ready."
