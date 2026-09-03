@@ -41,6 +41,10 @@ services:
     volumes:
       - hermes-data:/opt/data
       - type: bind
+        source: ./.agents
+        target: /opt/self-assistant-marketplace/.agents
+        read_only: true
+      - type: bind
         source: ./plugins/slack-pr-review-gate
         target: /opt/data/plugins/slack-pr-review-gate
         read_only: true
@@ -123,6 +127,10 @@ services:
     volumes:
       - hermes-data:/opt/data
       - paseo-docker-certs:/run/paseo-docker-certs:ro
+      - type: bind
+        source: ./.agents
+        target: /opt/self-assistant-marketplace/.agents
+        read_only: true
       - type: bind
         source: ./skills/pr-reviewer
         target: /opt/data/.agents/skills/pr-reviewer

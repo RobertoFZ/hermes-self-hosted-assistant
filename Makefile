@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help init bootstrap build up down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status auth-linear check-tool-updates paseo-up paseo-status paseo-logs paseo-register-workspace paseo-pair paseo-provider-status auth-github gateway-setup sync-skills sync-crons cron-status digest-preview review-history-init review-recover review-cleanup install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
+.PHONY: help init bootstrap build up down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status auth-linear check-tool-updates paseo-up paseo-status paseo-logs paseo-register-workspace paseo-pair paseo-provider-status auth-github gateway-setup sync-skills sync-codex-plugins sync-crons cron-status digest-preview review-history-init review-recover review-cleanup install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
 
 help: ## Show the available commands
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -11,7 +11,7 @@ build: ## Build the Hermes image with GitHub CLI
 init: ## Create ignored local configuration files without overwriting them
 	./scripts/bootstrap.sh
 
-bootstrap: init build up sync-skills sync-crons ## Build and start a fresh installation
+bootstrap: init build up sync-skills sync-codex-plugins sync-crons ## Build and start a fresh installation
 	@printf '%s\n' "Next: authenticate Hermes, Codex CLI, and GitHub; clone the workspace; then run make paseo-register-workspace and make paseo-pair"
 
 up: ## Start Hermes in the background
@@ -88,6 +88,9 @@ gateway-setup: ## Configure Slack, Telegram, or another messaging platform
 
 sync-skills: ## Sync Hermes orchestration and digest skills
 	./scripts/sync-skills.sh
+
+sync-codex-plugins: ## Install repository-managed Codex plugins in the container profile
+	./scripts/sync-codex-plugins.sh
 
 sync-crons: ## Reconcile Hermes jobs from the single config/crons.json file
 	./scripts/sync-crons.sh

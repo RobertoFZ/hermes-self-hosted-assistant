@@ -19,6 +19,8 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   command -v bwrap >/dev/null
   test "$(codex --version)" = "codex-cli $CODEX_VERSION"
   codex login status
+  test -f /opt/self-assistant-marketplace/.agents/plugins/marketplace.json
+  codex plugin list --json | python3 -c "import json,sys; items=json.load(sys.stdin).get(\"installed\", []); desired=[x for x in items if x.get(\"pluginId\") == \"compound-engineering@self-assistant\" and x.get(\"version\") == \"3.24.0\" and x.get(\"enabled\") is True]; conflicts=[x for x in items if x.get(\"name\") == \"compound-engineering\" and x.get(\"pluginId\") != \"compound-engineering@self-assistant\" and x.get(\"enabled\") is True]; sys.exit(0 if len(desired) == 1 and not conflicts else \"Compound Engineering 3.24.0 is missing, disabled, or duplicated\")"
   test "$(openspec --version)" = "$OPENSPEC_VERSION"
   hermes skills list | grep -F codex-pr-review >/dev/null
   hermes skills list | grep -F review-digest >/dev/null
@@ -48,6 +50,8 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   paseo provider diagnostic --host 127.0.0.1:6767 --json codex >/dev/null
   paseo project ls --host 127.0.0.1:6767 --json | grep -F "$REVIEW_MONOREPO_ROOT" >/dev/null
   test -f /opt/data/.agents/skills/pr-reviewer/SKILL.md
+  test -f /opt/self-assistant-marketplace/.agents/plugins/marketplace.json
+  codex plugin list --json | python3 -c "import json,sys; items=json.load(sys.stdin).get(\"installed\", []); desired=[x for x in items if x.get(\"pluginId\") == \"compound-engineering@self-assistant\" and x.get(\"version\") == \"3.24.0\" and x.get(\"enabled\") is True]; conflicts=[x for x in items if x.get(\"name\") == \"compound-engineering\" and x.get(\"pluginId\") != \"compound-engineering@self-assistant\" and x.get(\"enabled\") is True]; sys.exit(0 if len(desired) == 1 and not conflicts else \"Compound Engineering 3.24.0 is missing, disabled, or duplicated\")"
   codex mcp get linear | grep -F "https://mcp.linear.app/mcp/readonly" >/dev/null
   linear_status="$(codex mcp list | awk '\''$1 == "linear" { print }'\'')"
   test -n "$linear_status"

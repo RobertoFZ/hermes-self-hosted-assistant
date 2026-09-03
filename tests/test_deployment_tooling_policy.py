@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 
@@ -20,6 +21,12 @@ APPLY_REVIEW_POLICY = (ROOT / "scripts" / "apply-review-policy.sh").read_text(
     encoding="utf-8"
 )
 SYNC_SKILLS = (ROOT / "scripts" / "sync-skills.sh").read_text(encoding="utf-8")
+SYNC_CODEX_PLUGINS = (ROOT / "scripts" / "sync-codex-plugins.sh").read_text(
+    encoding="utf-8"
+)
+CODEX_PLUGIN_MARKETPLACE = json.loads(
+    (ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
+)
 CRON_CONFIG = (ROOT / "config" / "crons.json").read_text(encoding="utf-8")
 REVIEW_RESULT_SCHEMA = (
     ROOT / "automation" / "review-result.schema.json"
@@ -50,6 +57,40 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
     def test_codex_make_target_uses_the_configured_monorepo_root(self):
         self.assertIn("codex: ## Open Codex CLI", MAKEFILE)
         self.assertIn('cd "$$REVIEW_MONOREPO_ROOT"; exec codex', MAKEFILE)
+
+    def test_compound_engineering_is_repo_managed_and_pinned(self):
+        self.assertEqual(CODEX_PLUGIN_MARKETPLACE["name"], "self-assistant")
+        plugin = CODEX_PLUGIN_MARKETPLACE["plugins"][0]
+        self.assertEqual(plugin["name"], "compound-engineering")
+        self.assertEqual(
+            plugin["source"]["url"],
+            "https://github.com/EveryInc/compound-engineering-plugin.git",
+        )
+        self.assertEqual(
+            plugin["source"]["sha"],
+            "3ad9b51bceecf0158e590c882034d0398dbb9c5c",
+        )
+        self.assertEqual(
+            COMPOSE.count("target: /opt/self-assistant-marketplace/.agents"), 2
+        )
+        self.assertIn("sync-codex-plugins: ##", MAKEFILE)
+        self.assertIn(
+            "sync-codex-plugins",
+            MAKEFILE.split("bootstrap:", 1)[1].splitlines()[0],
+        )
+        self.assertIn(
+            'codex plugin marketplace add "$marketplace_root" --json',
+            SYNC_CODEX_PLUGINS,
+        )
+        self.assertIn(
+            'codex plugin add "$plugin_id" --json', SYNC_CODEX_PLUGINS
+        )
+        self.assertIn(
+            "Another Compound Engineering plugin is enabled", SYNC_CODEX_PLUGINS
+        )
+        self.assertGreaterEqual(
+            VERIFY.count("compound-engineering@self-assistant"), 2
+        )
 
     def test_tool_update_check_is_read_only_and_checks_both_npm_packages(self):
         self.assertIn("check-tool-updates: ##", MAKEFILE)

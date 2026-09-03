@@ -5,15 +5,17 @@ review assistant. It uses the Hermes agent runtime with the `openai-codex`
 provider and interactive ChatGPT/Codex OAuth; it does not require an
 `OPENAI_API_KEY`.
 
-The repository owns the Codex `pr-reviewer`, two Hermes orchestration skills,
-the persisted review-history schema, the daily digest definition, and the Slack
-review-only policy. Every installation supplies its own credentials and Slack
-identifiers through ignored runtime files.
+The repository owns the Codex `pr-reviewer`, a pinned Compound Engineering
+plugin declaration, two Hermes orchestration skills, the persisted
+review-history schema, the daily digest definition, and the Slack review-only
+policy. Every installation supplies its own credentials and Slack identifiers
+through ignored runtime files.
 
 ## Included boundaries
 
 - OpenAI Codex provider authenticated through ChatGPT OAuth
 - Pinned standalone Codex CLI with its own persistent ChatGPT OAuth
+- Repository-managed Compound Engineering plugin pinned to version `3.24.0`
 - Pinned Paseo daemon and web UI for using that Codex CLI remotely
 - Hermes-to-Paseo delegation of exact PR review requests
 - GitHub CLI OAuth for reading PRs and publishing `APPROVE` or `COMMENT`
@@ -52,6 +54,7 @@ Important runtime locations:
 |---|---|---|
 | Hermes Codex OAuth | `/opt/data/auth.json` | Never |
 | Standalone Codex CLI OAuth | `/opt/data/.codex/auth.json` | Never |
+| Installed Codex plugin cache and state | `/opt/data/.codex/plugins` and `/opt/data/.codex/config.toml` | Never |
 | Paseo daemon identity, pairings, and projects | `/opt/data/.paseo` | Never |
 | GitHub CLI OAuth | `/opt/data/.config/gh/hosts.yml` | Never |
 | Native Git credential configuration | `/opt/data/.gitconfig` | Never |
@@ -61,6 +64,7 @@ Important runtime locations:
 | Verified review history | `/opt/data/review-history/reviews.sqlite3` | Never |
 | Managed Hermes cron IDs | `/opt/data/cron/repository-managed-jobs.json` | Never |
 | Codex review skill | `skills/pr-reviewer` | Yes |
+| Codex plugin marketplace | `.agents/plugins/marketplace.json` | Yes |
 | Hermes orchestration skills | `skills/codex-pr-review`, `skills/review-digest` | Yes |
 | Cron source of truth | `config/crons.json` | Yes |
 
@@ -116,6 +120,7 @@ Build and start:
 make build
 make up
 make sync-skills
+make sync-codex-plugins
 make sync-crons
 ```
 
@@ -123,6 +128,15 @@ The derived image installs pinned standalone Codex (`0.149.1` by default), its
 Linux `bubblewrap` sandbox prerequisite, OpenSpec (`1.6.0`), and Paseo (`0.5.2`).
 Override `CODEX_VERSION`, `OPENSPEC_VERSION`, or `PASEO_VERSION` only after
 validating the new version.
+
+`make sync-codex-plugins` registers the repository marketplace inside the
+container's persistent Codex profile and installs Compound Engineering from the
+immutable Git commit declared in `.agents/plugins/marketplace.json`. The
+marketplace definition is bind-mounted read-only; downloaded plugin files and
+enabled state remain under `/opt/data/.codex`, shared by Hermes and Paseo. This
+does not modify the host user's Codex configuration. Synchronization stops if a
+Compound Engineering copy from another marketplace is already enabled, avoiding
+duplicate skill registrations and leaving removal or migration explicit.
 
 Authenticate the ChatGPT/Codex subscription interactively:
 
@@ -359,6 +373,7 @@ make init
 make build
 make up
 make sync-skills
+make sync-codex-plugins
 make apply-review-policy
 make restart
 make sync-crons
@@ -392,6 +407,7 @@ make paseo-register-workspace # register the review monorepo
 make paseo-provider-status # verify Paseo can launch Codex
 make paseo-pair           # pair with the hosted Paseo web app
 make sync-skills          # copy Hermes orchestration skills into persistent state
+make sync-codex-plugins   # install the pinned Compound Engineering plugin
 make sync-crons           # reconcile jobs from config/crons.json
 make cron-status          # list active Hermes cron jobs
 make digest-preview       # inspect verified 24-hour digest data
@@ -531,6 +547,7 @@ make volume-restore BACKUP_FILE=/absolute/secure/path/hermes-data.tgz
 make build
 make up
 make sync-skills
+make sync-codex-plugins
 make sync-crons
 make paseo-register-workspace
 make paseo-provider-status
@@ -565,6 +582,10 @@ encrypted, access-controlled backup storage.
 - Review all dependency/image upgrades before deployment. The current Dockerfile
   tracks the upstream Hermes `latest` image; pin a tested release or digest for
   production reproducibility.
+- Review Compound Engineering upgrades before changing its pinned commit. Its
+  skills can overlap conceptually with gstack workflows; use explicit skill
+  names when intent could match both toolkits. Codex exposes this plugin's
+  skills under the `compound-engineering:` namespace.
 
 ## References
 
@@ -574,6 +595,8 @@ encrypted, access-controlled backup storage.
 - [OpenAI Codex CLI](https://developers.openai.com/codex/cli/)
 - [OpenAI Codex authentication](https://developers.openai.com/codex/auth/)
 - [OpenAI Codex app-server](https://developers.openai.com/codex/app-server/)
+- [OpenAI plugin development](https://developers.openai.com/plugins/build/plugins)
+- [Compound Engineering plugin](https://github.com/EveryInc/compound-engineering-plugin)
 - [Paseo documentation](https://paseo.sh/docs)
 - [Paseo Docker deployment](https://paseo.sh/docs/docker)
 - [Paseo connectivity and relay](https://paseo.sh/docs/connectivity)
