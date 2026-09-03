@@ -21,6 +21,7 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   codex login status
   test -f /opt/self-assistant-marketplace/.agents/plugins/marketplace.json
   codex plugin list --json | python3 -c "import json,sys; items=json.load(sys.stdin).get(\"installed\", []); desired=[x for x in items if x.get(\"pluginId\") == \"compound-engineering@self-assistant\" and x.get(\"version\") == \"3.24.0\" and x.get(\"enabled\") is True]; conflicts=[x for x in items if x.get(\"name\") == \"compound-engineering\" and x.get(\"pluginId\") != \"compound-engineering@self-assistant\" and x.get(\"enabled\") is True]; sys.exit(0 if len(desired) == 1 and not conflicts else \"Compound Engineering 3.24.0 is missing, disabled, or duplicated\")"
+  python3 /opt/review-tooling/remove_gstack.py --check
   test "$(openspec --version)" = "$OPENSPEC_VERSION"
   hermes skills list | grep -F codex-pr-review >/dev/null
   hermes skills list | grep -F review-digest >/dev/null

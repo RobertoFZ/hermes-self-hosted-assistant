@@ -16,6 +16,7 @@ through ignored runtime files.
 - OpenAI Codex provider authenticated through ChatGPT OAuth
 - Pinned standalone Codex CLI with its own persistent ChatGPT OAuth
 - Repository-managed Compound Engineering plugin pinned to version `3.24.0`
+- No gstack skill registrations in the container Codex profile
 - Pinned Paseo daemon and web UI for using that Codex CLI remotely
 - Hermes-to-Paseo delegation of exact PR review requests
 - GitHub CLI OAuth for reading PRs and publishing `APPROVE` or `COMMENT`
@@ -120,6 +121,7 @@ Build and start:
 make build
 make up
 make sync-skills
+make uninstall-gstack
 make sync-codex-plugins
 make sync-crons
 ```
@@ -137,6 +139,11 @@ enabled state remain under `/opt/data/.codex`, shared by Hermes and Paseo. This
 does not modify the host user's Codex configuration. Synchronization stops if a
 Compound Engineering copy from another marketplace is already enabled, avoiding
 duplicate skill registrations and leaving removal or migration explicit.
+
+`make uninstall-gstack` removes only entries named `gstack` or `gstack-*` from
+the persistent container's `.codex/skills` and `.agents/skills` directories. It
+does not touch the host Codex profile, unrelated skills, or a retained gstack
+source checkout outside those registration directories.
 
 Authenticate the ChatGPT/Codex subscription interactively:
 
@@ -373,6 +380,7 @@ make init
 make build
 make up
 make sync-skills
+make uninstall-gstack
 make sync-codex-plugins
 make apply-review-policy
 make restart
@@ -407,6 +415,7 @@ make paseo-register-workspace # register the review monorepo
 make paseo-provider-status # verify Paseo can launch Codex
 make paseo-pair           # pair with the hosted Paseo web app
 make sync-skills          # copy Hermes orchestration skills into persistent state
+make uninstall-gstack     # remove gstack from the container Codex profile
 make sync-codex-plugins   # install the pinned Compound Engineering plugin
 make sync-crons           # reconcile jobs from config/crons.json
 make cron-status          # list active Hermes cron jobs
@@ -547,6 +556,7 @@ make volume-restore BACKUP_FILE=/absolute/secure/path/hermes-data.tgz
 make build
 make up
 make sync-skills
+make uninstall-gstack
 make sync-codex-plugins
 make sync-crons
 make paseo-register-workspace
@@ -582,10 +592,9 @@ encrypted, access-controlled backup storage.
 - Review all dependency/image upgrades before deployment. The current Dockerfile
   tracks the upstream Hermes `latest` image; pin a tested release or digest for
   production reproducibility.
-- Review Compound Engineering upgrades before changing its pinned commit. Its
-  skills can overlap conceptually with gstack workflows; use explicit skill
-  names when intent could match both toolkits. Codex exposes this plugin's
-  skills under the `compound-engineering:` namespace.
+- Review Compound Engineering upgrades before changing its pinned commit.
+  Codex exposes this plugin's skills under the `compound-engineering:`
+  namespace.
 
 ## References
 

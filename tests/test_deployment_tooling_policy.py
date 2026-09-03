@@ -24,6 +24,12 @@ SYNC_SKILLS = (ROOT / "scripts" / "sync-skills.sh").read_text(encoding="utf-8")
 SYNC_CODEX_PLUGINS = (ROOT / "scripts" / "sync-codex-plugins.sh").read_text(
     encoding="utf-8"
 )
+REMOVE_GSTACK = (ROOT / "scripts" / "remove_gstack.py").read_text(
+    encoding="utf-8"
+)
+UNINSTALL_GSTACK = (ROOT / "scripts" / "uninstall-gstack.sh").read_text(
+    encoding="utf-8"
+)
 CODEX_PLUGIN_MARKETPLACE = json.loads(
     (ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
 )
@@ -91,6 +97,18 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertGreaterEqual(
             VERIFY.count("compound-engineering@self-assistant"), 2
         )
+
+    def test_gstack_is_removed_only_from_container_skill_roots(self):
+        self.assertIn("uninstall-gstack: ##", MAKEFILE)
+        self.assertIn(
+            "uninstall-gstack", MAKEFILE.split("bootstrap:", 1)[1].splitlines()[0]
+        )
+        self.assertIn("/opt/review-tooling/remove_gstack.py", UNINSTALL_GSTACK)
+        self.assertIn('Path("/opt/data/.codex/skills")', REMOVE_GSTACK)
+        self.assertIn('Path("/opt/data/.agents/skills")', REMOVE_GSTACK)
+        self.assertIn('path.name == "gstack"', REMOVE_GSTACK)
+        self.assertIn('path.name.startswith("gstack-")', REMOVE_GSTACK)
+        self.assertIn("remove_gstack.py --check", VERIFY)
 
     def test_tool_update_check_is_read_only_and_checks_both_npm_packages(self):
         self.assertIn("check-tool-updates: ##", MAKEFILE)
