@@ -16,7 +16,7 @@ PREPARE_BRANCH = (
     ROOT / "skills" / "prepare-branch-for-pr" / "SKILL.md"
 ).read_text(encoding="utf-8")
 
-WORKFLOW_SKILLS = (
+CODEX_SKILLS = (
     "auto-pr-workflow",
     "linear-ticket-selection",
     "ticket-openspec-planning",
@@ -25,6 +25,7 @@ WORKFLOW_SKILLS = (
     "merge-pr-and-clean-worktree",
     "codex-self-review",
     "pr-reviewer",
+    "pr-decision-review",
 )
 
 
@@ -49,7 +50,7 @@ class AutoPRWorkflowTests(unittest.TestCase):
         self.assertIn("structured `pre_pr_review`", PREPARE_BRANCH)
         self.assertIn("`reviewed_head` equals", PREPARE_BRANCH)
 
-    def test_installer_links_complete_workflow_bundle_and_preserves_conflict(self):
+    def test_installer_links_repo_managed_skills_and_preserves_conflict(self):
         with tempfile.TemporaryDirectory() as directory:
             codex_home = Path(directory) / "codex-home"
             conflicting = codex_home / "skills" / "pr-reviewer"
@@ -67,7 +68,7 @@ class AutoPRWorkflowTests(unittest.TestCase):
                 text=True,
             )
 
-            for skill_name in WORKFLOW_SKILLS:
+            for skill_name in CODEX_SKILLS:
                 installed = codex_home / "skills" / skill_name
                 self.assertTrue(installed.is_symlink(), skill_name)
                 self.assertEqual(

@@ -1,0 +1,129 @@
+{
+  "skill_name": "pr-decision-review",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Use $pr-decision-review with no PR arguments. The repository has five open PRs: one authored by me, one draft, one I approved, one I previously commented on, and one I have never reviewed. Show the selection step only.",
+      "expected_output": "The workflow runs deterministic minimal discovery, excludes the user's PR, preselects the two ready PRs without the user's approval, shows no categories or AI summary, and waits for selection before fetching any diff or discussion.",
+      "files": [],
+      "expectations": [
+        "Uses scripts/discover_prs.py and performs no AI analysis during discovery.",
+        "Excludes the PR authored by the current GitHub login.",
+        "Defaults to ready PRs that are not approved by the current reviewer.",
+        "Shows only minimal selection fields and fetches no diff, files, comments, or categories."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Use $pr-decision-review on superproject PR 810. It updates an OpenSpec change and the payments gitlink to a commit associated with child PR 72. Do not inspect the child repository. The selected PR introduces new product behavior and its OpenSpec omits deletion lifecycle behavior.",
+      "expected_output": "The workflow briefs PR 810, compares its selected-PR evidence with the proven OpenSpec, reports deletion lifecycle as an OpenSpec parity question, and lists child PR 72 using metadata only without fetching child code, diff, files, checks, or discussions.",
+      "files": [],
+      "expectations": [
+        "Treats the proven OpenSpec as intent context and reports parity without code-review severity.",
+        "Lists the gitlink-associated PR number, title, URL, and state.",
+        "Does not enter or inspect the child repository through the gitlink.",
+        "Places the unresolved lifecycle decision under Things that deserve a closer look."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Use $pr-decision-review on database backfill PR 41. It is layer 2 of a three-PR stack. An ancestor's resolved thread accepted temporary nullability, while a descendant's open thread discusses when the constraint becomes required. Brief only PR 41 and do not show code.",
+      "expected_output": "The workflow keeps target-layer scope, compares PR 41 only with its immediate parent, retrieves other-layer discussions without their diffs, summarizes both relevant topics, and does not treat the descendant discussion as proof that PR 41 is independently complete.",
+      "files": [],
+      "expectations": [
+        "Uses target-layer rather than widening to stack-wide review.",
+        "Collects discussion-only context from the other layers and no implementation data.",
+        "Preserves the resolved ancestor decision as inherited context.",
+        "Treats the descendant discussion as future context rather than completion proof."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Use $pr-decision-review on PR 55. Candidate E1 asks whether retries can duplicate a charge. A resolved current-head thread already discussed and fixed exactly that behavior; an outdated thread discussed a different retry timing concern. GraphQL history is complete. Draft any appropriate comment but do not post.",
+      "expected_output": "The validator classifies E1 as resolved-and-addressed using the exact matching thread, keeps the timing thread as related but distinct context, and does not draft a duplicate comment for E1.",
+      "files": [],
+      "expectations": [
+        "Validates the candidate against raw discussions rather than topic summaries alone.",
+        "Classifies the exact resolved concern as resolved-and-addressed.",
+        "Distinguishes the outdated timing topic from the duplicate charge concern.",
+        "Does not prepare or post a duplicate comment."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Use $pr-decision-review on two PRs supplied in order. The first is a restorative bug fix with no OpenSpec. The second adds behavior with no related OpenSpec and has incomplete review-thread pagination. After its briefing, I ask to post a new comment, but its head changed since collection.",
+      "expected_output": "The workflow omits the missing OpenSpec concern for the restorative bug fix, raises an OpenSpec question for the behavior-changing PR, reports duplicate protection incomplete, refuses the stale-head write, recollects and revalidates the second PR, and never starts AI analysis for the next PR early.",
+      "files": [],
+      "expectations": [
+        "Distinguishes restorative bug fixes from behavior-changing work for OpenSpec applicability.",
+        "Reports incomplete duplicate protection honestly.",
+        "Requires explicit human confirmation before publication.",
+        "Stops publication on head drift and rebuilds evidence before any write.",
+        "Processes supplied PRs sequentially."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Use $pr-decision-review on PR 88. GitHub reports 32 additions, 18 deletions, and 4 changed files. The patch adds RetryCharge, modifies PaymentAttempt, and deletes LegacyRetryPolicy. There are no database changes. Give me the default briefing.",
+      "expected_output": "The briefing shows +32, -18, 50 changed lines across 4 files; inventories RetryCharge as added, PaymentAttempt as modified, and LegacyRetryPolicy as deleted; and shows the selected PR's textual code because the total is exactly 50 lines.",
+      "files": ["evals/fixtures/small-change.md"],
+      "expectations": [
+        "Displays additions, deletions, total changed lines, and changed-file count.",
+        "Treats exactly 50 changed lines as a small change and shows the textual patch by default.",
+        "Always groups named structural units as added, modified, and deleted.",
+        "Does not invent a database section or a decorative Mermaid diagram."
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "Use $pr-decision-review on PR 93. It has 95 additions and 27 deletions across 6 files. It adds CancellationReason, modifies Booking, adds cancellation_reasons, adds nullable bookings.cancellation_reason_id with an index and foreign key, backfills existing bookings, and makes the column non-null in a later migration. Give me the default briefing.",
+      "expected_output": "The briefing reports +95, -27, 122 changed lines across 6 files without showing the patch; inventories the changed classes; lists every table, column, index, foreign key, backfill, and nullability transition inline; and includes a focused Mermaid diagram of the affected schema or rollout.",
+      "files": ["evals/fixtures/database-change.md"],
+      "expectations": [
+        "Displays the deterministic line and file counts but does not show code for the 122-line change.",
+        "Inventories CancellationReason as added and Booking as modified.",
+        "Explains table, column, index, foreign-key, backfill, and nullable-to-non-null operations inline.",
+        "Includes a syntactically plausible focused Mermaid diagram for the database changes."
+      ]
+    },
+    {
+      "id": 8,
+      "prompt": "Use $pr-decision-review for the supplied four-PR round. We already finished PR #202 and are reviewing PR #203. I say: Comment E1 and E2. Handle the publication request safely.",
+      "expected_output": "The workflow does not publish from bare reused IDs. It identifies PR #203 as active, shows the exact PR destination and drafts using acme/payments#203:E1 and acme/payments#203:E2, asks for qualified confirmation, and never uses PR #202's candidates or action artifacts.",
+      "files": ["evals/fixtures/four-pr-action-collision.md"],
+      "expectations": [
+        "Does not perform or claim any GitHub write from the bare E1 and E2 request.",
+        "Resolves the active review identity using actual repository and PR number, not queue position.",
+        "Shows acme/payments#203:E1 and acme/payments#203:E2 and requests qualified publication confirmation.",
+        "Does not select PR #202 candidates, context, thread identifiers, or action plans."
+      ]
+    },
+    {
+      "id": 9,
+      "prompt": "Use $pr-decision-review for the supplied active PR #203 context. I say: Reply to #203:E1. The matching open thread is on PR #202. Handle the request safely.",
+      "expected_output": "The workflow does not reply immediately. It shows that #203:E1 belongs to the active review but routes to exact thread RT_202_E1 on PR #202, then requires explicit confirmation of acme/payments#202 before preparing a cross-PR reply action.",
+      "files": ["evals/fixtures/cross-pr-thread-route.md"],
+      "expectations": [
+        "Does not perform or claim a thread reply before cross-PR confirmation.",
+        "Keeps acme/payments#203 as the active review target while naming acme/payments#202 as the publication target.",
+        "Names exact thread RT_202_E1 rather than inferring a thread from local E1 numbering.",
+        "Requires explicit confirmation of the PR #202 destination before allowing the cross-PR plan."
+      ]
+    },
+    {
+      "id": 10,
+      "prompt": "Use $pr-decision-review. I confirm new comments for acme/payments#203:E1 and acme/payments#203:E2. The current head is cccccccccccccccccccccccccccccccccccccccc. Prepare the publication action plan from the supplied current context and validation artifacts, but do not post anything.",
+      "expected_output": "The workflow runs the deterministic action guard and creates a plan whose review and publication targets are both acme/payments#203, whose items are exactly #203:E1 and #203:E2, and whose head is the supplied current head. It performs no GitHub write.",
+      "files": [
+        "evals/fixtures/action-context-pr203.json",
+        "evals/fixtures/action-validation-pr203.json"
+      ],
+      "expectations": [
+        "Uses scripts/prepare_review_actions.py rather than constructing a target from conversation memory.",
+        "Creates an action plan with both review_target and publication_target set to acme/payments#203.",
+        "Includes exactly acme/payments#203:E1 and acme/payments#203:E2 with the current head and a deterministic action_id.",
+        "Does not perform or claim any GitHub write."
+      ]
+    }
+  ]
+}

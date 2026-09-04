@@ -157,7 +157,7 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn('"voiceMode": {', PASEO_CONFIG)
         self.assertGreaterEqual(PASEO_CONFIG.count('"enabled": false'), 2)
 
-    def test_auto_pr_bundle_is_codex_only_and_hermes_has_orchestration_skills(self):
+    def test_repo_managed_codex_skills_are_mounted_only_in_paseo(self):
         for skill_name in (
             "auto-pr-workflow",
             "linear-ticket-selection",
@@ -167,6 +167,7 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
             "merge-pr-and-clean-worktree",
             "codex-self-review",
             "pr-reviewer",
+            "pr-decision-review",
         ):
             self.assertIn(
                 f"target: /opt/data/.agents/skills/{skill_name}", COMPOSE

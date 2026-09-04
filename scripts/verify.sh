@@ -60,7 +60,8 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
     publish-ready-pr \
     merge-pr-and-clean-worktree \
     codex-self-review \
-    pr-reviewer
+    pr-reviewer \
+    pr-decision-review
   do
     test -f "/opt/data/.agents/skills/$skill_name/SKILL.md"
   done

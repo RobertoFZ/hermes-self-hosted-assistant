@@ -119,7 +119,7 @@ digest-preview: ## Show the verified previous-24-hours digest source as JSON
 	docker compose exec -T --user hermes hermes /bin/sh -eu -c \
 		'python3 /opt/review-automation/review_automation.py digest-source --hours 24 --timezone "$${TZ:-America/Mexico_City}"'
 
-install-global-skill: ## Link the Auto-PR workflow bundle into the local Codex skill directory
+install-global-skill: ## Link repository-managed skills into the local Codex skill directory
 	./scripts/install-global-skill.sh
 
 apply-review-policy: ## Persist the configured review-only Slack policy
@@ -145,6 +145,7 @@ verify: ## Verify provider, GitHub, skill, plugin, and workspace configuration
 
 test: ## Run repository policy tests and validate the skill
 	python -m unittest discover -s tests -v
+	python -m unittest discover -s skills/pr-decision-review/tests -v
 	python scripts/validate-skill.py
 
 volume-backup: ## Back up the stopped persistent volume (BACKUP_FILE=/absolute/file.tgz)

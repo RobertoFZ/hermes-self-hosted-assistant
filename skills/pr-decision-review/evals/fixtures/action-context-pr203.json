@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "repository": "acme/payments",
+  "pr": 203,
+  "head_ref_oid": "cccccccccccccccccccccccccccccccccccccccc",
+  "metadata": {
+    "number": 203,
+    "title": "Coordinate retry decisions",
+    "url": "https://github.com/acme/payments/pull/203"
+  }
+}

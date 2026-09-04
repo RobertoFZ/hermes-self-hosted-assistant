@@ -1,0 +1,7 @@
+interface:
+  display_name: "PR Decision Review"
+  short_description: "Explain PR decisions and structural changes"
+  default_prompt: "Use $pr-decision-review to guide a fast, sequential review of external GitHub PR objectives, line counts, structural and database changes, OpenSpec parity, and prior discussions; show code automatically only for changes of 50 lines or fewer."
+
+policy:
+  allow_implicit_invocation: false

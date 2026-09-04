@@ -163,6 +163,10 @@ services:
         source: ./skills/pr-reviewer
         target: /opt/data/.agents/skills/pr-reviewer
         read_only: true
+      - type: bind
+        source: ./skills/pr-decision-review
+        target: /opt/data/.agents/skills/pr-decision-review
+        read_only: true
     networks:
       - default
       - paseo-docker

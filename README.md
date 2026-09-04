@@ -64,7 +64,7 @@ Important runtime locations:
 | Review workspace | `/opt/data/repos/reserhub-revenue-full` | Never |
 | Verified review history | `/opt/data/review-history/reviews.sqlite3` | Never |
 | Managed Hermes cron IDs | `/opt/data/cron/repository-managed-jobs.json` | Never |
-| Codex Auto-PR and review skills | `skills/{auto-pr-workflow,...}` | Yes |
+| Repository-managed Codex skills | `skills/{auto-pr-workflow,...}` | Yes |
 | Codex plugin marketplace | `.agents/plugins/marketplace.json` | Yes |
 | Hermes orchestration skills | `skills/codex-pr-review`, `skills/review-digest` | Yes |
 | Cron source of truth | `config/crons.json` | Yes |
@@ -430,9 +430,11 @@ make verify               # verify auth, skill, plugin, and workspace
 make test                 # local policy and skill tests
 ```
 
-The repository copies are canonical. To install the Auto-PR workflow phases and
-`codex-self-review`, and `pr-reviewer` as the current user's global Codex
-skills:
+The repository copies are canonical. They include the Auto-PR workflow,
+`codex-self-review`, `pr-reviewer`, and the explicit-only
+`pr-decision-review` workflow vendored from
+`reservamos/skills@94c241ed26e6d6cc04cbbc8333232dcfd00a7c51`. To install
+them as the current user's global Codex skills:
 
 ```bash
 make install-global-skill
@@ -445,9 +447,19 @@ repositories must still provide the repository-specific `bootstrap`, OpenSpec,
 git-workflow, and safe-worktree-cleaning skills checked by Auto-PR's dependency
 preflight.
 
-The same workflow bundle is bind-mounted read-only into Paseo's Codex skill
-root on the VPS. After changing the OpenSpec pin or any image-installed tool,
-rebuild before restarting:
+The same repository-managed skills are bind-mounted read-only into Paseo's
+Codex skill root on the VPS. Invoke the decision workflow explicitly:
+
+```text
+Use $pr-decision-review on PR 123.
+```
+
+It is intended for PRs authored by someone other than the authenticated GitHub
+user and always requires an explicit human action before publishing comments
+or a review decision.
+
+After changing the OpenSpec pin or any image-installed tool, rebuild before
+restarting:
 
 ```bash
 git pull --ff-only origin main

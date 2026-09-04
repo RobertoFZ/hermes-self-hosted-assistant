@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "repository": "acme/payments",
+  "review_pr": 203,
+  "briefed_head_oid": "cccccccccccccccccccccccccccccccccccccccc",
+  "duplicate_protection": "complete",
+  "limitations": [],
+  "candidate_decisions": [
+    {
+      "candidate_id": "acme/payments#203:E1",
+      "local_id": "E1",
+      "classification": "new-topic",
+      "topic_ids": [],
+      "owning_repository": "acme/payments",
+      "owning_pr": 203,
+      "suggested_action": "new-comment",
+      "thread_id": null,
+      "thread_url": null,
+      "reason": "New retry ownership decision."
+    },
+    {
+      "candidate_id": "acme/payments#203:E2",
+      "local_id": "E2",
+      "classification": "new-topic",
+      "topic_ids": [],
+      "owning_repository": "acme/payments",
+      "owning_pr": 203,
+      "suggested_action": "new-comment",
+      "thread_id": null,
+      "thread_url": null,
+      "reason": "New lifecycle decision."
+    }
+  ]
+}

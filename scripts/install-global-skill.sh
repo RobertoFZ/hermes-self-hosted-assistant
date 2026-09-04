@@ -13,6 +13,7 @@ publish-ready-pr
 merge-pr-and-clean-worktree
 codex-self-review
 pr-reviewer
+pr-decision-review
 "
 
 mkdir -p "$codex_root/skills"
