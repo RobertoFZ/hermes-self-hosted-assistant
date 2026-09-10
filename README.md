@@ -5,18 +5,15 @@ review assistant. It uses the Hermes agent runtime with the `openai-codex`
 provider and interactive ChatGPT/Codex OAuth; it does not require an
 `OPENAI_API_KEY`.
 
-The repository owns the Codex `pr-reviewer`, a pinned Compound Engineering
-plugin declaration, two Hermes orchestration skills, the persisted
-review-history schema, the daily digest definition, and the Slack review-only
-policy. Every installation supplies its own credentials and Slack identifiers
-through ignored runtime files.
+The repository owns the Codex `pr-reviewer`, two Hermes orchestration skills,
+the persisted review-history schema, the daily digest definition, and the Slack
+review-only policy. Every installation supplies its own credentials and Slack
+identifiers through ignored runtime files.
 
 ## Included boundaries
 
 - OpenAI Codex provider authenticated through ChatGPT OAuth
 - Pinned standalone Codex CLI with its own persistent ChatGPT OAuth
-- Repository-managed Compound Engineering plugin pinned to version `3.24.0`
-- No gstack skill registrations in the container Codex profile
 - Pinned Paseo daemon and web UI for using that Codex CLI remotely
 - Hermes-to-Paseo delegation of exact PR review requests
 - GitHub CLI OAuth for reading PRs and publishing `APPROVE` or `COMMENT`
@@ -55,7 +52,6 @@ Important runtime locations:
 |---|---|---|
 | Hermes Codex OAuth | `/opt/data/auth.json` | Never |
 | Standalone Codex CLI OAuth | `/opt/data/.codex/auth.json` | Never |
-| Installed Codex plugin cache and state | `/opt/data/.codex/plugins` and `/opt/data/.codex/config.toml` | Never |
 | Paseo daemon identity, pairings, and projects | `/opt/data/.paseo` | Never |
 | GitHub CLI OAuth | `/opt/data/.config/gh/hosts.yml` | Never |
 | Native Git credential configuration | `/opt/data/.gitconfig` | Never |
@@ -65,7 +61,6 @@ Important runtime locations:
 | Verified review history | `/opt/data/review-history/reviews.sqlite3` | Never |
 | Managed Hermes cron IDs | `/opt/data/cron/repository-managed-jobs.json` | Never |
 | Repository-managed Codex skills | `skills/{auto-pr-workflow,...}` | Yes |
-| Codex plugin marketplace | `.agents/plugins/marketplace.json` | Yes |
 | Hermes orchestration skills | `skills/codex-pr-review`, `skills/review-digest` | Yes |
 | Cron source of truth | `config/crons.json` | Yes |
 
@@ -121,8 +116,6 @@ Build and start:
 make build
 make up
 make sync-skills
-make uninstall-gstack
-make sync-codex-plugins
 make sync-crons
 ```
 
@@ -130,20 +123,6 @@ The derived image installs pinned standalone Codex (`0.149.1` by default), its
 Linux `bubblewrap` sandbox prerequisite, OpenSpec (`1.10.0`), and Paseo (`0.5.2`).
 Override `CODEX_VERSION`, `OPENSPEC_VERSION`, or `PASEO_VERSION` only after
 validating the new version.
-
-`make sync-codex-plugins` registers the repository marketplace inside the
-container's persistent Codex profile and installs Compound Engineering from the
-immutable Git commit declared in `.agents/plugins/marketplace.json`. The
-marketplace definition is bind-mounted read-only; downloaded plugin files and
-enabled state remain under `/opt/data/.codex`, shared by Hermes and Paseo. This
-does not modify the host user's Codex configuration. Synchronization stops if a
-Compound Engineering copy from another marketplace is already enabled, avoiding
-duplicate skill registrations and leaving removal or migration explicit.
-
-`make uninstall-gstack` removes only entries named `gstack` or `gstack-*` from
-the persistent container's `.codex/skills` and `.agents/skills` directories. It
-does not touch the host Codex profile, unrelated skills, or a retained gstack
-source checkout outside those registration directories.
 
 Authenticate the ChatGPT/Codex subscription interactively:
 
@@ -372,16 +351,28 @@ Hermes counterpart on the next synchronization.
 ## Existing installations
 
 This repository keeps the existing `self-assistant-hermes-data` volume name.
-After pulling or copying these files, switch Hermes to the repository-owned
-skill and configurable plugin without touching the volume:
+If the installation previously ran `make sync-codex-plugins`, remove the retired
+plugin and its marketplace registration once while the current services are
+running:
+
+```bash
+docker compose exec -T --user hermes paseo codex plugin list --json
+docker compose exec -T --user hermes paseo codex plugin marketplace list --json
+docker compose exec -T --user hermes paseo codex plugin remove compound-engineering@self-assistant --json
+docker compose exec -T --user hermes paseo codex plugin marketplace remove self-assistant --json
+```
+
+Run each removal only when the preceding list output contains the corresponding
+plugin or marketplace. These commands remove the installed plugin cache and
+marketplace configuration from the persistent Codex profile without touching
+unrelated skills or authentication. Then pull or copy these files and switch
+Hermes to the remaining repository-owned skills without deleting the volume:
 
 ```bash
 make init
 make build
 make up
 make sync-skills
-make uninstall-gstack
-make sync-codex-plugins
 make apply-review-policy
 make restart
 make sync-crons
@@ -415,8 +406,6 @@ make paseo-register-workspace # register the review monorepo
 make paseo-provider-status # verify Paseo can launch Codex
 make paseo-pair           # pair with the hosted Paseo web app
 make sync-skills          # copy Hermes orchestration skills into persistent state
-make uninstall-gstack     # remove gstack from the container Codex profile
-make sync-codex-plugins   # install the pinned Compound Engineering plugin
 make sync-crons           # reconcile jobs from config/crons.json
 make cron-status          # list active Hermes cron jobs
 make digest-preview       # inspect verified 24-hour digest data
@@ -583,9 +572,11 @@ make init
 make volume-restore BACKUP_FILE=/absolute/secure/path/hermes-data.tgz
 make build
 make up
+docker compose exec -T --user hermes paseo codex plugin list --json
+docker compose exec -T --user hermes paseo codex plugin marketplace list --json
+docker compose exec -T --user hermes paseo codex plugin remove compound-engineering@self-assistant --json
+docker compose exec -T --user hermes paseo codex plugin marketplace remove self-assistant --json
 make sync-skills
-make uninstall-gstack
-make sync-codex-plugins
 make sync-crons
 make paseo-register-workspace
 make paseo-provider-status
@@ -593,8 +584,9 @@ make verify
 ```
 
 The restore command creates the configured volume if necessary and refuses to
-overwrite a non-empty volume. Do not restart the old installation after the VPS
-starts using the migrated OAuth and messaging state.
+overwrite a non-empty volume. Run each plugin removal only when the preceding
+list output contains the corresponding retired entry. Do not restart the old
+installation after the VPS starts using the migrated OAuth and messaging state.
 
 If credentials are intentionally not migrated, omit the restore and follow the
 first-time authentication steps instead. Pair Slack/Telegram identities again
@@ -620,10 +612,6 @@ encrypted, access-controlled backup storage.
 - Review all dependency/image upgrades before deployment. The current Dockerfile
   tracks the upstream Hermes `latest` image; pin a tested release or digest for
   production reproducibility.
-- Review Compound Engineering upgrades before changing its pinned commit.
-  Codex exposes this plugin's skills under the `compound-engineering:`
-  namespace.
-
 ## References
 
 - [Hermes providers](https://hermes-agent.nousresearch.com/docs/integrations/providers)
@@ -632,8 +620,6 @@ encrypted, access-controlled backup storage.
 - [OpenAI Codex CLI](https://developers.openai.com/codex/cli/)
 - [OpenAI Codex authentication](https://developers.openai.com/codex/auth/)
 - [OpenAI Codex app-server](https://developers.openai.com/codex/app-server/)
-- [OpenAI plugin development](https://developers.openai.com/plugins/build/plugins)
-- [Compound Engineering plugin](https://github.com/EveryInc/compound-engineering-plugin)
 - [Paseo documentation](https://paseo.sh/docs)
 - [Paseo Docker deployment](https://paseo.sh/docs/docker)
 - [Paseo connectivity and relay](https://paseo.sh/docs/connectivity)

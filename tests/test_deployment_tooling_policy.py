@@ -1,4 +1,3 @@
-import json
 import unittest
 from pathlib import Path
 
@@ -8,6 +7,7 @@ DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 COMPOSE = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 VERIFY = (ROOT / "scripts" / "verify.sh").read_text(encoding="utf-8")
 MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
+README = (ROOT / "README.md").read_text(encoding="utf-8")
 BOOTSTRAP = (ROOT / "scripts" / "bootstrap.sh").read_text(encoding="utf-8")
 PASEO_ENTRYPOINT = (ROOT / "scripts" / "paseo-entrypoint.sh").read_text(
     encoding="utf-8"
@@ -21,18 +21,6 @@ APPLY_REVIEW_POLICY = (ROOT / "scripts" / "apply-review-policy.sh").read_text(
     encoding="utf-8"
 )
 SYNC_SKILLS = (ROOT / "scripts" / "sync-skills.sh").read_text(encoding="utf-8")
-SYNC_CODEX_PLUGINS = (ROOT / "scripts" / "sync-codex-plugins.sh").read_text(
-    encoding="utf-8"
-)
-REMOVE_GSTACK = (ROOT / "scripts" / "remove_gstack.py").read_text(
-    encoding="utf-8"
-)
-UNINSTALL_GSTACK = (ROOT / "scripts" / "uninstall-gstack.sh").read_text(
-    encoding="utf-8"
-)
-CODEX_PLUGIN_MARKETPLACE = json.loads(
-    (ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf-8")
-)
 CRON_CONFIG = (ROOT / "config" / "crons.json").read_text(encoding="utf-8")
 REVIEW_RESULT_SCHEMA = (
     ROOT / "automation" / "review-result.schema.json"
@@ -64,51 +52,37 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn("codex: ## Open Codex CLI", MAKEFILE)
         self.assertIn('cd "$$REVIEW_MONOREPO_ROOT"; exec codex', MAKEFILE)
 
-    def test_compound_engineering_is_repo_managed_and_pinned(self):
-        self.assertEqual(CODEX_PLUGIN_MARKETPLACE["name"], "self-assistant")
-        plugin = CODEX_PLUGIN_MARKETPLACE["plugins"][0]
-        self.assertEqual(plugin["name"], "compound-engineering")
-        self.assertEqual(
-            plugin["source"]["url"],
-            "https://github.com/EveryInc/compound-engineering-plugin.git",
+    def test_obsolete_codex_skill_integrations_are_not_managed(self):
+        obsolete_paths = (
+            ROOT / ".agents" / "plugins" / "marketplace.json",
+            ROOT / "scripts" / "sync-codex-plugins.sh",
+            ROOT / "scripts" / "remove_gstack.py",
+            ROOT / "scripts" / "uninstall-gstack.sh",
         )
-        self.assertEqual(
-            plugin["source"]["sha"],
-            "3ad9b51bceecf0158e590c882034d0398dbb9c5c",
-        )
-        self.assertEqual(
-            COMPOSE.count("target: /opt/self-assistant-marketplace/.agents"), 2
-        )
-        self.assertIn("sync-codex-plugins: ##", MAKEFILE)
-        self.assertIn(
-            "sync-codex-plugins",
-            MAKEFILE.split("bootstrap:", 1)[1].splitlines()[0],
-        )
-        self.assertIn(
-            'codex plugin marketplace add "$marketplace_root" --json',
-            SYNC_CODEX_PLUGINS,
-        )
-        self.assertIn(
-            'codex plugin add "$plugin_id" --json', SYNC_CODEX_PLUGINS
-        )
-        self.assertIn(
-            "Another Compound Engineering plugin is enabled", SYNC_CODEX_PLUGINS
-        )
-        self.assertGreaterEqual(
-            VERIFY.count("compound-engineering@self-assistant"), 2
-        )
+        for path in obsolete_paths:
+            self.assertFalse(path.exists(), path)
 
-    def test_gstack_is_removed_only_from_container_skill_roots(self):
-        self.assertIn("uninstall-gstack: ##", MAKEFILE)
-        self.assertIn(
-            "uninstall-gstack", MAKEFILE.split("bootstrap:", 1)[1].splitlines()[0]
+        for content in (MAKEFILE, COMPOSE):
+            self.assertNotIn("compound-engineering", content.lower())
+            self.assertNotIn("gstack", content.lower())
+
+        self.assertNotIn("gstack", VERIFY.lower())
+        self.assertEqual(
+            VERIFY.count('x.get(\\"name\\") == \\"compound-engineering\\"'),
+            2,
         )
-        self.assertIn("/opt/review-tooling/remove_gstack.py", UNINSTALL_GSTACK)
-        self.assertIn('Path("/opt/data/.codex/skills")', REMOVE_GSTACK)
-        self.assertIn('Path("/opt/data/.agents/skills")', REMOVE_GSTACK)
-        self.assertIn('path.name == "gstack"', REMOVE_GSTACK)
-        self.assertIn('path.name.startswith("gstack-")', REMOVE_GSTACK)
-        self.assertIn("remove_gstack.py --check", VERIFY)
+        self.assertNotIn("codex plugin add", VERIFY)
+
+        self.assertEqual(
+            README.count(
+                "codex plugin remove compound-engineering@self-assistant --json"
+            ),
+            2,
+        )
+        self.assertEqual(
+            README.count("codex plugin marketplace remove self-assistant --json"),
+            2,
+        )
 
     def test_tool_update_check_is_read_only_and_checks_all_npm_packages(self):
         self.assertIn("check-tool-updates: ##", MAKEFILE)
