@@ -1,6 +1,6 @@
 ---
 name: codex-self-review
-description: Review a complete branch, commit, or working-tree diff directly with Codex before commit or pull-request publication, without an external review CLI. Use for pre-PR self-review, Auto-PR review phases, branch-diff audits, test-gap checks, security and error-handling review, or targeted re-review after fixes.
+description: Review a complete branch, commit, or working-tree diff directly with Codex before commit or pull-request publication, without an external review CLI. Use for pre-PR self-review, branch-diff audits, test-gap checks, security and error-handling review, or targeted re-review after fixes.
 ---
 
 # Codex Self Review

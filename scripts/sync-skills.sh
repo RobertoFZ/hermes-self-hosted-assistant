@@ -4,6 +4,23 @@ set -eu
 docker compose exec -T hermes /bin/sh -eu -c '
   chown "$HERMES_UID:$HERMES_GID" /opt/data/skills
 
+  # Remove retired repository-owned Codex workflow skills from the persistent
+  # volume. Check -L separately so dangling symlinks are removed as well.
+  retired_codex_skills="
+    auto-pr-workflow
+    linear-ticket-selection
+    merge-pr-and-clean-worktree
+    prepare-branch-for-pr
+    publish-ready-pr
+    ticket-openspec-planning
+  "
+  for skill_name in $retired_codex_skills; do
+    skill_path="/opt/data/.agents/skills/$skill_name"
+    if [ -L "$skill_path" ] || [ -e "$skill_path" ]; then
+      rm -rf -- "$skill_path"
+    fi
+  done
+
   # Remove obsolete Hermes-owned review skills. Codex discovers pr-reviewer
   # through Paseo at /opt/data/.agents/skills/pr-reviewer instead.
   if [ -f /opt/data/skills/custom/code-review/SKILL.md ]; then

@@ -133,12 +133,6 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
 
     def test_repo_managed_codex_skills_are_mounted_only_in_paseo(self):
         for skill_name in (
-            "auto-pr-workflow",
-            "linear-ticket-selection",
-            "ticket-openspec-planning",
-            "prepare-branch-for-pr",
-            "publish-ready-pr",
-            "merge-pr-and-clean-worktree",
             "codex-self-review",
             "pr-reviewer",
             "pr-decision-review",
@@ -154,6 +148,37 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn("target: /opt/global-skills/review-digest", COMPOSE)
         self.assertIn("/opt/data/skills/custom/pr-reviewer", SYNC_SKILLS)
         self.assertIn('\\"skill\\": \\"codex-pr-review\\"', APPLY_REVIEW_POLICY)
+
+    def test_retired_codex_workflow_skills_are_removed_from_persistent_state(self):
+        for skill_name in (
+            "auto-pr-workflow",
+            "linear-ticket-selection",
+            "merge-pr-and-clean-worktree",
+            "prepare-branch-for-pr",
+            "publish-ready-pr",
+            "ticket-openspec-planning",
+        ):
+            self.assertFalse((ROOT / "skills" / skill_name).exists())
+            self.assertNotIn(f"source: ./skills/{skill_name}", COMPOSE)
+            self.assertNotIn(
+                f"target: /opt/data/.agents/skills/{skill_name}", COMPOSE
+            )
+            self.assertIn(skill_name, SYNC_SKILLS)
+            self.assertIn(skill_name, VERIFY)
+
+        self.assertIn(
+            'skill_path="/opt/data/.agents/skills/$skill_name"', SYNC_SKILLS
+        )
+        self.assertIn(
+            'if [ -L "$skill_path" ] || [ -e "$skill_path" ]; then',
+            SYNC_SKILLS,
+        )
+        self.assertIn('rm -rf -- "$skill_path"', SYNC_SKILLS)
+        self.assertIn(
+            'skill_path="/opt/data/.agents/skills/$skill_name"', VERIFY
+        )
+        self.assertIn('test ! -e "$skill_path"', VERIFY)
+        self.assertIn('test ! -L "$skill_path"', VERIFY)
 
     def test_daily_digest_uses_single_repository_config_at_1700_mexico_time(self):
         self.assertIn('"schedule": "0 17 * * *"', CRON_CONFIG)

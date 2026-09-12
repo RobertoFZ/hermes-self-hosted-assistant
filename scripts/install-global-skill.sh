@@ -5,18 +5,30 @@ repository_root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
 codex_root="${CODEX_HOME:-${HOME:?}/.codex}"
 
 workflow_skills="
-auto-pr-workflow
-linear-ticket-selection
-ticket-openspec-planning
-prepare-branch-for-pr
-publish-ready-pr
-merge-pr-and-clean-worktree
 codex-self-review
 pr-reviewer
 pr-decision-review
 "
+retired_workflow_skills="
+auto-pr-workflow
+linear-ticket-selection
+merge-pr-and-clean-worktree
+prepare-branch-for-pr
+publish-ready-pr
+ticket-openspec-planning
+"
 
 mkdir -p "$codex_root/skills"
+
+for skill_name in $retired_workflow_skills; do
+  former_source_skill="$repository_root/skills/$skill_name"
+  target="$codex_root/skills/$skill_name"
+
+  if [ -L "$target" ] && [ "$(readlink "$target")" = "$former_source_skill" ]; then
+    rm -- "$target"
+    echo "Removed retired repository skill symlink: $target"
+  fi
+done
 
 for skill_name in $workflow_skills; do
   source_skill="$repository_root/skills/$skill_name"

@@ -1,7 +1,7 @@
 # Codex Self Review Workflow
 
 Use this workflow for standalone reviews and as the review phase of another
-skill such as `auto-pr-workflow`.
+workflow.
 
 ## 1. Resolve the review contract
 

@@ -52,17 +52,23 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   paseo provider diagnostic --host 127.0.0.1:6767 --json codex >/dev/null
   paseo project ls --host 127.0.0.1:6767 --json | grep -F "$REVIEW_MONOREPO_ROOT" >/dev/null
   for skill_name in \
-    auto-pr-workflow \
-    linear-ticket-selection \
-    ticket-openspec-planning \
-    prepare-branch-for-pr \
-    publish-ready-pr \
-    merge-pr-and-clean-worktree \
     codex-self-review \
     pr-reviewer \
     pr-decision-review
   do
     test -f "/opt/data/.agents/skills/$skill_name/SKILL.md"
+  done
+  for skill_name in \
+    auto-pr-workflow \
+    linear-ticket-selection \
+    merge-pr-and-clean-worktree \
+    prepare-branch-for-pr \
+    publish-ready-pr \
+    ticket-openspec-planning
+  do
+    skill_path="/opt/data/.agents/skills/$skill_name"
+    test ! -e "$skill_path"
+    test ! -L "$skill_path"
   done
   for skill_name in openspec-propose openspec-apply-change
   do
@@ -79,4 +85,4 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   ! printf "%s\n" "$linear_status" | grep -F "Not logged in" >/dev/null
 '
 
-echo "Hermes orchestration, Codex Auto-PR workflow, Paseo, GitHub verification, review history, digest cron, plugin, and workspace are ready."
+echo "Hermes orchestration, Codex review skills, Paseo, GitHub verification, review history, digest cron, plugin, and workspace are ready."
