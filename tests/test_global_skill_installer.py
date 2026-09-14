@@ -10,6 +10,8 @@ CODEX_SKILLS = (
     "codex-self-review",
     "pr-reviewer",
     "pr-decision-review",
+    "writing-for-agents",
+    "retro",
 )
 RETIRED_CODEX_SKILLS = (
     "auto-pr-workflow",

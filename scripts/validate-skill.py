@@ -20,8 +20,17 @@ for skill_file in sorted(skills_root.glob("*/SKILL.md")):
             raise SystemExit(f"Invalid frontmatter line in {skill_file}: {line}")
         fields[key.strip()] = value.strip()
 
-    if set(fields) != {"name", "description"}:
-        raise SystemExit(f"Frontmatter must contain only name and description: {skill_file}")
+    required_fields = {"name", "description"}
+    allowed_fields = required_fields | {"disable-model-invocation"}
+    if not required_fields <= set(fields) or not set(fields) <= allowed_fields:
+        raise SystemExit(
+            "Frontmatter must contain name and description, with optional "
+            f"disable-model-invocation: {skill_file}"
+        )
+    if fields.get("disable-model-invocation") not in (None, "true", "false"):
+        raise SystemExit(
+            f"disable-model-invocation must be true or false: {skill_file}"
+        )
     if fields["name"] != skill_file.parent.name:
         raise SystemExit(f"Skill name must match its directory: {skill_file}")
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", fields["name"]):

@@ -8,6 +8,8 @@ workflow_skills="
 codex-self-review
 pr-reviewer
 pr-decision-review
+writing-for-agents
+retro
 "
 retired_workflow_skills="
 auto-pr-workflow

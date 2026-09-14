@@ -19,7 +19,7 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   command -v bwrap >/dev/null
   test "$(codex --version)" = "codex-cli $CODEX_VERSION"
   codex login status
-  codex plugin list --json | python3 -c "import json,sys; items=json.load(sys.stdin).get(\"installed\", []); sys.exit(\"Compound Engineering remains installed\" if any(x.get(\"name\") == \"compound-engineering\" for x in items) else 0)"
+  codex plugin list --json | python3 -c "import json,sys; items=json.load(sys.stdin).get(\"installed\", []); desired=[x for x in items if x.get(\"pluginId\") == \"compound-engineering@compound-engineering-plugin\" and x.get(\"version\") == \"3.24.0\" and x.get(\"enabled\") is True]; conflicts=[x for x in items if x.get(\"name\") == \"compound-engineering\" and x.get(\"pluginId\") != \"compound-engineering@compound-engineering-plugin\" and x.get(\"enabled\") is True]; sys.exit(0 if len(desired) == 1 and not conflicts else \"Pinned Compound Engineering plugin is not ready\")"
   test "$(openspec --version)" = "$OPENSPEC_VERSION"
   hermes skills list | grep -F codex-pr-review >/dev/null
   hermes skills list | grep -F review-digest >/dev/null
@@ -47,16 +47,24 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   test "$(openspec --version)" = "$OPENSPEC_VERSION"
   (cd "$REVIEW_MONOREPO_ROOT" && openspec context --json >/dev/null)
   codex login status
-  codex plugin list --json | python3 -c "import json,sys; items=json.load(sys.stdin).get(\"installed\", []); sys.exit(\"Compound Engineering remains installed\" if any(x.get(\"name\") == \"compound-engineering\" for x in items) else 0)"
+  codex plugin list --json | python3 -c "import json,sys; items=json.load(sys.stdin).get(\"installed\", []); desired=[x for x in items if x.get(\"pluginId\") == \"compound-engineering@compound-engineering-plugin\" and x.get(\"version\") == \"3.24.0\" and x.get(\"enabled\") is True]; conflicts=[x for x in items if x.get(\"name\") == \"compound-engineering\" and x.get(\"pluginId\") != \"compound-engineering@compound-engineering-plugin\" and x.get(\"enabled\") is True]; sys.exit(0 if len(desired) == 1 and not conflicts else \"Pinned Compound Engineering plugin is not ready\")"
   curl --fail --silent --show-error http://127.0.0.1:6767/api/health >/dev/null
   paseo provider diagnostic --host 127.0.0.1:6767 --json codex >/dev/null
   paseo project ls --host 127.0.0.1:6767 --json | grep -F "$REVIEW_MONOREPO_ROOT" >/dev/null
   for skill_name in \
     codex-self-review \
     pr-reviewer \
-    pr-decision-review
+    pr-decision-review \
+    writing-for-agents \
+    retro
   do
-    test -f "/opt/data/.agents/skills/$skill_name/SKILL.md"
+    skill_path="/opt/data/.agents/skills/$skill_name"
+    test -f "$skill_path/SKILL.md"
+    mount_options="$(findmnt -n -o OPTIONS --target "$skill_path")"
+    case ",$mount_options," in
+      *,ro,*) ;;
+      *) echo "$skill_path is not mounted read-only." >&2; exit 1 ;;
+    esac
   done
   for skill_name in \
     auto-pr-workflow \
@@ -85,4 +93,4 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   ! printf "%s\n" "$linear_status" | grep -F "Not logged in" >/dev/null
 '
 
-echo "Hermes orchestration, Codex review skills, Paseo, GitHub verification, review history, digest cron, plugin, and workspace are ready."
+echo "Hermes orchestration, Codex skills and plugins, Paseo, GitHub verification, review history, digest cron, and workspace are ready."

@@ -135,6 +135,14 @@ services:
         source: ./skills/pr-decision-review
         target: /opt/data/.agents/skills/pr-decision-review
         read_only: true
+      - type: bind
+        source: ./skills/writing-for-agents
+        target: /opt/data/.agents/skills/writing-for-agents
+        read_only: true
+      - type: bind
+        source: ./skills/retro
+        target: /opt/data/.agents/skills/retro
+        read_only: true
     networks:
       - default
       - paseo-docker

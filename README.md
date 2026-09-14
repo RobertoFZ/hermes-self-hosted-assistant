@@ -5,10 +5,11 @@ review assistant. It uses the Hermes agent runtime with the `openai-codex`
 provider and interactive ChatGPT/Codex OAuth; it does not require an
 `OPENAI_API_KEY`.
 
-The repository owns the Codex `pr-reviewer`, two Hermes orchestration skills,
-the persisted review-history schema, the daily digest definition, and the Slack
-review-only policy. Every installation supplies its own credentials and Slack
-identifiers through ignored runtime files.
+The repository owns its Codex workflow skills, two Hermes orchestration skills,
+the pinned Compound Engineering plugin configuration, the persisted
+review-history schema, the daily digest definition, and the Slack review-only
+policy. Every installation supplies its own credentials and Slack identifiers
+through ignored runtime files.
 
 ## Included boundaries
 
@@ -21,6 +22,8 @@ identifiers through ignored runtime files.
 - Linear issue snapshots and normalized findings for later analysis
 - Daily Slack DM digest at 17:00 in `America/Mexico_City`
 - Pinned OpenSpec CLI for strict validation of specification changes
+- Compound Engineering `3.24.0` installed into the persistent Codex profile
+- Vendored `writing-for-agents` and explicit-only experimental `retro` skills
 - Persistent Hermes state, credentials, sessions, skills, and review checkout
 - Review-only Slack channel and delegated-reviewer DMs
 - Optional Telegram or other Hermes gateway integrations
@@ -60,7 +63,8 @@ Important runtime locations:
 | Review workspace | `/opt/data/repos/reserhub-revenue-full` | Never |
 | Verified review history | `/opt/data/review-history/reviews.sqlite3` | Never |
 | Managed Hermes cron IDs | `/opt/data/cron/repository-managed-jobs.json` | Never |
-| Repository-managed Codex skills | `skills/{codex-self-review,pr-reviewer,pr-decision-review}` | Yes |
+| Repository-managed Codex skills | `skills/{codex-self-review,pr-reviewer,pr-decision-review,writing-for-agents,retro}` | Yes |
+| Compound Engineering plugin cache and registration | `/opt/data/.codex` | Never |
 | Hermes orchestration skills | `skills/codex-pr-review`, `skills/review-digest` | Yes |
 | Cron source of truth | `config/crons.json` | Yes |
 
@@ -116,6 +120,7 @@ Build and start:
 make build
 make up
 make sync-skills
+make sync-codex-plugins
 make sync-crons
 ```
 
@@ -351,28 +356,16 @@ Hermes counterpart on the next synchronization.
 ## Existing installations
 
 This repository keeps the existing `self-assistant-hermes-data` volume name.
-If the installation previously ran `make sync-codex-plugins`, remove the retired
-plugin and its marketplace registration once while the current services are
-running:
-
-```bash
-docker compose exec -T --user hermes paseo codex plugin list --json
-docker compose exec -T --user hermes paseo codex plugin marketplace list --json
-docker compose exec -T --user hermes paseo codex plugin remove compound-engineering@self-assistant --json
-docker compose exec -T --user hermes paseo codex plugin marketplace remove self-assistant --json
-```
-
-Run each removal only when the preceding list output contains the corresponding
-plugin or marketplace. These commands remove the installed plugin cache and
-marketplace configuration from the persistent Codex profile without touching
-unrelated skills or authentication. Then pull or copy these files and switch
-Hermes to the remaining repository-owned skills without deleting the volume:
+Pull or copy these files, recreate the services so the new read-only skill
+mounts are applied, and synchronize the pinned plugin without deleting the
+volume:
 
 ```bash
 make init
 make build
 make up
 make sync-skills
+make sync-codex-plugins
 make apply-review-policy
 make restart
 make sync-crons
@@ -385,6 +378,12 @@ make verify
 `make sync-skills` also prunes the six retired repository-owned Codex workflow
 skills from `/opt/data/.agents/skills`; unrelated skills in that persistent
 directory are left untouched.
+
+`make sync-codex-plugins` migrates the repository's former `self-assistant`
+marketplace registration, then installs Compound Engineering from
+`EveryInc/compound-engineering-plugin` at the exact
+`compound-engineering-v3.24.0` tag. It recreates only that managed marketplace;
+other plugins and marketplaces are preserved.
 
 The container is recreated, but `/opt/data` and all OAuth, sessions, pairings,
 configuration, Paseo state, and repository data remain in the named volume.
@@ -410,6 +409,7 @@ make paseo-register-workspace # register the review monorepo
 make paseo-provider-status # verify Paseo can launch Codex
 make paseo-pair           # pair with the hosted Paseo web app
 make sync-skills          # copy Hermes orchestration skills into persistent state
+make sync-codex-plugins   # install Compound Engineering 3.24.0
 make sync-crons           # reconcile jobs from config/crons.json
 make cron-status          # list active Hermes cron jobs
 make digest-preview       # inspect verified 24-hour digest data
@@ -424,8 +424,10 @@ make test                 # local policy and skill tests
 ```
 
 The repository copies are canonical. They include `codex-self-review`,
-`pr-reviewer`, and the explicit-only `pr-decision-review` workflow vendored from
-`reservamos/skills@94c241ed26e6d6cc04cbbc8333232dcfd00a7c51`. To install
+`pr-reviewer`, the explicit-only `pr-decision-review` workflow vendored from
+`reservamos/skills@94c241ed26e6d6cc04cbbc8333232dcfd00a7c51`, and Matt
+Pocock's `writing-for-agents` and `retro` skills vendored from
+`mattpocock/skills@3cca18b368ae95cdbdebbff572ccafa662551015`. To install
 them as the current user's global Codex skills:
 
 ```bash
@@ -439,7 +441,14 @@ while leaving independently managed entries with the same names untouched.
 Restart Codex afterward so it refreshes the discovered skill catalog.
 
 The same repository-managed skills are bind-mounted read-only into Paseo's
-Codex skill root on the VPS. Invoke the decision workflow explicitly:
+Codex skill root on the VPS. `retro` is an upstream in-progress stub and remains
+explicit-only; invoke it manually when you intentionally want to trial it:
+
+```text
+Use $retro for this coding session.
+```
+
+Invoke the decision workflow explicitly:
 
 ```text
 Use $pr-decision-review on PR 123.
@@ -576,9 +585,8 @@ make build
 make up
 docker compose exec -T --user hermes paseo codex plugin list --json
 docker compose exec -T --user hermes paseo codex plugin marketplace list --json
-docker compose exec -T --user hermes paseo codex plugin remove compound-engineering@self-assistant --json
-docker compose exec -T --user hermes paseo codex plugin marketplace remove self-assistant --json
 make sync-skills
+make sync-codex-plugins
 make sync-crons
 make paseo-register-workspace
 make paseo-provider-status
@@ -586,9 +594,10 @@ make verify
 ```
 
 The restore command creates the configured volume if necessary and refuses to
-overwrite a non-empty volume. Run each plugin removal only when the preceding
-list output contains the corresponding retired entry. Do not restart the old
-installation after the VPS starts using the migrated OAuth and messaging state.
+overwrite a non-empty volume. The plugin list commands are diagnostic; the sync
+target performs the pinned installation and migrates the repository's old
+marketplace entry. Do not restart the old installation after the VPS starts
+using the migrated OAuth and messaging state.
 
 If credentials are intentionally not migrated, omit the restore and follow the
 first-time authentication steps instead. Pair Slack/Telegram identities again

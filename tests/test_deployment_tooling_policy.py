@@ -21,6 +21,7 @@ APPLY_REVIEW_POLICY = (ROOT / "scripts" / "apply-review-policy.sh").read_text(
     encoding="utf-8"
 )
 SYNC_SKILLS = (ROOT / "scripts" / "sync-skills.sh").read_text(encoding="utf-8")
+SYNC_CODEX_PLUGINS_PATH = ROOT / "scripts" / "sync-codex-plugins.sh"
 CRON_CONFIG = (ROOT / "config" / "crons.json").read_text(encoding="utf-8")
 REVIEW_RESULT_SCHEMA = (
     ROOT / "automation" / "review-result.schema.json"
@@ -52,10 +53,9 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn("codex: ## Open Codex CLI", MAKEFILE)
         self.assertIn('cd "$$REVIEW_MONOREPO_ROOT"; exec codex', MAKEFILE)
 
-    def test_obsolete_codex_skill_integrations_are_not_managed(self):
+    def test_gstack_integrations_are_not_managed(self):
         obsolete_paths = (
             ROOT / ".agents" / "plugins" / "marketplace.json",
-            ROOT / "scripts" / "sync-codex-plugins.sh",
             ROOT / "scripts" / "remove_gstack.py",
             ROOT / "scripts" / "uninstall-gstack.sh",
         )
@@ -63,25 +63,34 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
             self.assertFalse(path.exists(), path)
 
         for content in (MAKEFILE, COMPOSE):
-            self.assertNotIn("compound-engineering", content.lower())
             self.assertNotIn("gstack", content.lower())
 
         self.assertNotIn("gstack", VERIFY.lower())
-        self.assertEqual(
-            VERIFY.count('x.get(\\"name\\") == \\"compound-engineering\\"'),
-            2,
-        )
-        self.assertNotIn("codex plugin add", VERIFY)
 
-        self.assertEqual(
-            README.count(
-                "codex plugin remove compound-engineering@self-assistant --json"
-            ),
-            2,
+    def test_compound_engineering_is_installed_from_a_pinned_remote_marketplace(self):
+        self.assertTrue(SYNC_CODEX_PLUGINS_PATH.is_file())
+        sync_codex_plugins = SYNC_CODEX_PLUGINS_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("compound-engineering-v3.24.0", sync_codex_plugins)
+        self.assertIn(
+            "compound-engineering@compound-engineering-plugin", sync_codex_plugins
         )
-        self.assertEqual(
-            README.count("codex plugin marketplace remove self-assistant --json"),
-            2,
+        self.assertIn(
+            "codex plugin marketplace add EveryInc/compound-engineering-plugin",
+            sync_codex_plugins,
+        )
+        self.assertIn('--ref "$expected_ref" --json', sync_codex_plugins)
+        self.assertIn('codex plugin add "$plugin_id" --json', sync_codex_plugins)
+        self.assertNotIn("/opt/self-assistant-marketplace", sync_codex_plugins)
+        self.assertNotIn("compound-engineering", DOCKERFILE.lower())
+        self.assertNotIn("self-assistant-marketplace", COMPOSE)
+        self.assertIn("sync-codex-plugins: ##", MAKEFILE)
+        self.assertIn(
+            "sync-codex-plugins",
+            MAKEFILE.split("bootstrap:", 1)[1].splitlines()[0],
+        )
+        self.assertGreaterEqual(
+            VERIFY.count("compound-engineering@compound-engineering-plugin"), 2
         )
 
     def test_tool_update_check_is_read_only_and_checks_all_npm_packages(self):
@@ -136,18 +145,44 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
             "codex-self-review",
             "pr-reviewer",
             "pr-decision-review",
+            "writing-for-agents",
+            "retro",
         ):
             self.assertIn(
                 f"target: /opt/data/.agents/skills/{skill_name}", COMPOSE
             )
             self.assertIn(
-                f'\"/opt/data/.agents/skills/$skill_name/SKILL.md\"', VERIFY
+                'skill_path="/opt/data/.agents/skills/$skill_name"', VERIFY
             )
+        self.assertIn('findmnt -n -o OPTIONS --target "$skill_path"', VERIFY)
+        self.assertIn('*,ro,*)', VERIFY)
         self.assertNotIn("target: /opt/global-skills/pr-reviewer", COMPOSE)
         self.assertIn("target: /opt/global-skills/codex-pr-review", COMPOSE)
         self.assertIn("target: /opt/global-skills/review-digest", COMPOSE)
         self.assertIn("/opt/data/skills/custom/pr-reviewer", SYNC_SKILLS)
         self.assertIn('\\"skill\\": \\"codex-pr-review\\"', APPLY_REVIEW_POLICY)
+
+    def test_matt_pocock_skills_are_vendored_at_the_reviewed_revision(self):
+        revision = "3cca18b368ae95cdbdebbff572ccafa662551015"
+        for skill_name in ("writing-for-agents", "retro"):
+            skill_root = ROOT / "skills" / skill_name
+            self.assertTrue((skill_root / "SKILL.md").is_file())
+            self.assertTrue((skill_root / "agents" / "openai.yaml").is_file())
+            provenance = (skill_root / "UPSTREAM.md").read_text(encoding="utf-8")
+            self.assertIn(revision, provenance)
+            self.assertIn("Copyright (c) 2026 Matt Pocock", provenance)
+
+        retro = (ROOT / "skills" / "retro" / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("disable-model-invocation: true", retro)
+        self.assertIn("writing-for-agents", retro)
+        self.assertNotIn("Call the Skill tool", retro)
+
+        retro_openai = (
+            ROOT / "skills" / "retro" / "agents" / "openai.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("allow_implicit_invocation: false", retro_openai)
 
     def test_retired_codex_workflow_skills_are_removed_from_persistent_state(self):
         for skill_name in (
