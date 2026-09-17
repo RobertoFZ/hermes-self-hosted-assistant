@@ -239,6 +239,99 @@ class ReviewAutomationTests(unittest.TestCase):
             self.assertEqual(row["state"], "awaiting_decision")
             self.assertFalse(json.loads(row["structured_result"])["published"])
 
+    def test_analysis_lease_outlives_configured_paseo_timeout(self):
+        now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"REVIEW_PASEO_TIMEOUT": "1h"}, clear=False
+        ):
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, _ = automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T1",
+                    owner_user_id="U_OWNER",
+                    repo="acme/api",
+                    pr_number=42,
+                    pr_url="https://github.com/acme/api/pull/42",
+                )
+                proposal = automation.create_proposal_revision(
+                    db, conversation_id, head_sha="a" * 40
+                )
+                _, attempt_id = automation.claim_analysis_attempt(
+                    db, proposal["id"], claimant="worker", now=now
+                )
+                expiry = db.execute(
+                    "SELECT lease_expires_at FROM analysis_attempts WHERE id = ?",
+                    (attempt_id,),
+                ).fetchone()[0]
+
+        self.assertEqual(
+            datetime.fromisoformat(expiry) - now,
+            timedelta(seconds=3720),
+        )
+
+    def test_proposal_validation_rejects_approval_with_blocking_findings(self):
+        pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/42",
+            repo="acme/api",
+            number=42,
+            title="API",
+            body="",
+            head_sha="a" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        for category, severity in (("correctness", "nit"), ("architecture", "major")):
+            with self.subTest(category=category, severity=severity):
+                result = self._delta_result(
+                    head_sha=pr.head_sha,
+                    baseline_head_sha=None,
+                    status="initial",
+                    findings=(
+                        {
+                            "candidate_id": "C1",
+                            "category": category,
+                            "severity": severity,
+                        },
+                    ),
+                    new=("C1",),
+                )
+                result["event"] = "APPROVE"
+                with self.assertRaisesRegex(automation.AutomationError, "gate-blocking"):
+                    automation.validate_delta_result(
+                        result,
+                        pr,
+                        baseline_head_sha=None,
+                        prior_findings=(),
+                        compare_context=None,
+                    )
+
+    def test_initial_delta_must_match_unique_current_candidates(self):
+        pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/42",
+            repo="acme/api",
+            number=42,
+            title="API",
+            body="",
+            head_sha="a" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        result = self._delta_result(
+            head_sha=pr.head_sha,
+            baseline_head_sha=None,
+            status="initial",
+            findings=({"candidate_id": "C1", "category": "architecture", "severity": "minor"},),
+        )
+        with self.assertRaisesRegex(automation.AutomationError, "classify every finding"):
+            automation.validate_delta_result(
+                result,
+                pr,
+                baseline_head_sha=None,
+                prior_findings=(),
+                compare_context=None,
+            )
+
     def test_thread_command_guards_owner_thread_revision_and_head(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "reviews.sqlite3"
@@ -380,6 +473,77 @@ class ReviewAutomationTests(unittest.TestCase):
             self.assertEqual(published["status"], "completed")
             self.assertEqual(replayed["status"], "completed")
             github_write.assert_called_once()
+
+    def test_post_write_head_change_keeps_receipt_and_starts_latest_rereview(self):
+        old_pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/42",
+            repo="acme/api",
+            number=42,
+            title="Fix persisted prices",
+            body="",
+            head_sha="a" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        new_pr = automation.PullRequest(
+            **{**old_pr.__dict__, "head_sha": "b" * 40}
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                self._ready_proposal(db)
+                marker_comment = {
+                    "id": 301,
+                    "user": {"login": "review-bot"},
+                    "commit_id": old_pr.head_sha,
+                    "original_commit_id": old_pr.head_sha,
+                    "body": "Comment\n\n<!-- hermes-review-action:ACTION:C1 -->",
+                    "html_url": "https://github.com/acme/api/pull/42#discussion_r301",
+                }
+                with patch.object(
+                    automation, "load_pr", side_effect=[old_pr, new_pr]
+                ), patch.object(
+                    automation, "reviewer_login", return_value="review-bot"
+                ), patch.object(
+                    automation,
+                    "github_publications",
+                    side_effect=[
+                        {"reviews": [], "comments": []},
+                        {"reviews": [], "comments": [marker_comment]},
+                    ],
+                ), patch.object(
+                    automation, "github_json_request", return_value={"id": 201}
+                ), patch.object(
+                    automation,
+                    "action_marker",
+                    side_effect=lambda action_id, candidate_id=None: (
+                        "<!-- hermes-review-action:ACTION"
+                        + (f":{candidate_id}" if candidate_id else "")
+                        + " -->"
+                    ),
+                ), patch.object(
+                    automation,
+                    "re_review_current_head",
+                    return_value={
+                        "status": "awaiting_decision",
+                        "revision_token": "P2",
+                        "head_sha": new_pr.head_sha,
+                    },
+                ) as re_review:
+                    published = automation.execute_thread_command(
+                        db,
+                        workspace_id="T1",
+                        dm_channel_id="D1",
+                        thread_ts="1720000000.000100",
+                        owner_user_id="U_OWNER",
+                        command_text="publish P1 C1",
+                        idempotency_key="msg-post-write-drift",
+                    )
+
+        self.assertEqual(published["status"], "completed")
+        self.assertTrue(published["receipt"]["head_changed_after_write"])
+        self.assertEqual(published["re_review"]["revision_token"], "P2")
+        re_review.assert_called_once()
 
     def test_stale_head_and_unsafe_or_self_approval_never_write(self):
         cases = (
@@ -890,16 +1054,21 @@ class ReviewAutomationTests(unittest.TestCase):
                     baseline_head_sha=baseline,
                     addressed=("C1", "C2"),
                 )
+                latest_result = self._delta_result(
+                    head_sha=latest_head,
+                    baseline_head_sha=baseline,
+                    addressed=("C1", "C2"),
+                )
                 with patch.object(
                     automation,
                     "load_pr",
-                    side_effect=[pr(analyzed_head), pr(latest_head)],
+                    side_effect=[pr(analyzed_head), pr(latest_head), pr(latest_head)],
                 ), patch.object(
                     automation,
                     "github_compare_context",
                     return_value={"status": "available"},
                 ), patch.object(
-                    automation, "invoke_codex", return_value=result
+                    automation, "invoke_codex", side_effect=[result, latest_result]
                 ), patch.object(
                     automation, "cleanup_paseo_review_agent", return_value=[]
                 ):
@@ -921,9 +1090,10 @@ class ReviewAutomationTests(unittest.TestCase):
 
         self.assertEqual(proposed["status"], "head_changed_during_analysis")
         self.assertEqual(proposed["re_review"]["revision_token"], "P3")
+        self.assertEqual(proposed["re_review"]["status"], "awaiting_decision")
         self.assertEqual(proposed["re_review"]["head_sha"], latest_head)
         self.assertEqual(revisions[1]["state"], "superseded")
-        self.assertEqual(revisions[2]["state"], "queued")
+        self.assertEqual(revisions[2]["state"], "awaiting_decision")
         self.assertEqual(revisions[2]["baseline_head_sha"], baseline)
 
     def test_stale_action_runs_re_review_and_rejects_old_revision(self):
@@ -1470,6 +1640,74 @@ class ReviewAutomationTests(unittest.TestCase):
         self.assertEqual(latest_third["head_sha"], "d" * 40)
         self.assertEqual(latest_third["baseline_head_sha"], "c" * 40)
         self.assertEqual(latest_third["state"], "queued")
+
+    def test_reclaimed_output_is_persisted_without_running_codex_again(self):
+        now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+        pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/42",
+            repo="acme/api",
+            number=42,
+            title="API",
+            body="",
+            head_sha="a" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        result = self._delta_result(
+            head_sha=pr.head_sha,
+            baseline_head_sha=None,
+            status="initial",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, _ = automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T1",
+                    owner_user_id="U_OWNER",
+                    repo=pr.repo,
+                    pr_number=pr.number,
+                    pr_url=pr.url,
+                )
+                proposal = automation.create_proposal_revision(
+                    db, conversation_id, head_sha=pr.head_sha
+                )
+                _, attempt_id = automation.claim_analysis_attempt(
+                    db,
+                    proposal["id"],
+                    claimant="worker",
+                    now=now - timedelta(minutes=10),
+                    lease_seconds=60,
+                )
+                automation.record_analysis_output(
+                    db,
+                    attempt_id=attempt_id,
+                    output=result,
+                    now=now - timedelta(minutes=8),
+                )
+                automation.reclaim_expired_analysis(
+                    db,
+                    current_heads={(pr.repo, pr.number): pr.head_sha},
+                    now=now,
+                )
+                proposal = automation.latest_proposal(db, conversation_id)
+                with patch.object(
+                    automation, "load_pr", return_value=pr
+                ), patch.object(
+                    automation, "invoke_codex"
+                ) as invoke, patch.object(
+                    automation, "cleanup_paseo_review_agent", return_value=[]
+                ):
+                    recovered = automation.analyze_proposal_revision(
+                        db,
+                        pr=pr,
+                        login="review-bot",
+                        proposal=proposal,
+                        claimant="recovery",
+                    )
+
+        self.assertEqual(recovered["status"], "awaiting_decision")
+        invoke.assert_not_called()
 
     def test_exact_pr_urls_and_repository_allowlist_are_enforced(self):
         with patch.dict(

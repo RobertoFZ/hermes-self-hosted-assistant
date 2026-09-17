@@ -206,7 +206,7 @@ class SlackReviewPolicyTests(unittest.TestCase):
         self.assertEqual(result["action"], "skip")
         scheduled.assert_called_once()
 
-    def test_owner_bot_mention_authorizes_self_review(self):
+    def test_owner_bot_mention_schedules_review(self):
         with patch.object(self.plugin, "_schedule_source_request") as scheduled:
             result = self.plugin._review_only_policy(
                 event(
@@ -218,9 +218,10 @@ class SlackReviewPolicyTests(unittest.TestCase):
                 gateway=gateway(),
             )
         self.assertEqual(result["action"], "skip")
-        self.assertTrue(scheduled.call_args.args[-1])
+        scheduled.assert_called_once()
+        self.assertEqual(len(scheduled.call_args.args), 4)
 
-    def test_owner_without_bot_mention_does_not_authorize_self_review(self):
+    def test_owner_without_bot_mention_schedules_review(self):
         with patch.object(self.plugin, "_schedule_source_request") as scheduled:
             result = self.plugin._review_only_policy(
                 event(
@@ -231,9 +232,10 @@ class SlackReviewPolicyTests(unittest.TestCase):
                 )
             )
         self.assertEqual(result["action"], "skip")
-        self.assertFalse(scheduled.call_args.args[-1])
+        scheduled.assert_called_once()
+        self.assertEqual(len(scheduled.call_args.args), 4)
 
-    def test_slack_app_mention_event_authorizes_owner_without_configured_id(self):
+    def test_slack_app_mention_event_schedules_owner_review(self):
         with patch.object(self.plugin, "_schedule_source_request") as scheduled:
             result = self.plugin._review_only_policy(
                 event(
@@ -244,9 +246,10 @@ class SlackReviewPolicyTests(unittest.TestCase):
                 )
             )
         self.assertEqual(result["action"], "skip")
-        self.assertTrue(scheduled.call_args.args[-1])
+        scheduled.assert_called_once()
+        self.assertEqual(len(scheduled.call_args.args), 4)
 
-    def test_reviewer_cannot_authorize_self_review_by_mentioning_bot(self):
+    def test_reviewer_bot_mention_schedules_review_without_special_authority(self):
         with patch.object(self.plugin, "_schedule_source_request") as scheduled:
             result = self.plugin._review_only_policy(
                 event(
@@ -257,7 +260,8 @@ class SlackReviewPolicyTests(unittest.TestCase):
                 gateway=gateway(),
             )
         self.assertEqual(result["action"], "skip")
-        self.assertFalse(scheduled.call_args.args[-1])
+        scheduled.assert_called_once()
+        self.assertEqual(len(scheduled.call_args.args), 4)
 
     def test_reviewer_non_review_dm_is_rejected(self):
         result = self.plugin._review_only_policy(
@@ -324,6 +328,12 @@ class SlackReviewPolicyTests(unittest.TestCase):
         self.assertEqual(result["action"], "skip")
         self.assertEqual(result["reason"], "review-command-scheduled")
         scheduled.assert_called_once()
+
+    def test_exact_owner_command_uses_canonical_parser(self):
+        self.plugin._AUTOMATION = automation
+        self.assertTrue(self.plugin._is_exact_command("publish P2 C1 C3"))
+        self.assertFalse(self.plugin._is_exact_command("publish P2 C1 C1"))
+        self.assertFalse(self.plugin._is_exact_command("please approve P2"))
 
     def test_three_pr_request_schedules_one_private_summary_each_without_public_text(self):
         request = event(
@@ -550,6 +560,70 @@ class SlackReviewPolicyTests(unittest.TestCase):
         self.assertEqual(len(adapter.sent), 1)
         self.assertEqual(state, "blocked")
 
+    def test_only_persisted_ready_proposals_are_deliverable(self):
+        self.assertIsNone(
+            self.plugin._ready_proposal_result(
+                {"status": "analyzing", "proposal_id": "proposal-1"}
+            )
+        )
+        ready = {
+            "status": "awaiting_decision",
+            "proposal_id": "proposal-2",
+            "revision_token": "P2",
+        }
+        self.assertIs(self.plugin._ready_proposal_result(ready), ready)
+        wrapped = {"status": "head_changed_during_analysis", "re_review": ready}
+        self.assertIs(self.plugin._ready_proposal_result(wrapped), ready)
+
+    def test_expired_private_delivery_reconciles_before_reposting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            _, conversation_id, proposal = self._persist_ready_proposal(database)
+            adapter = FakeSlackAdapter()
+
+            async def find_message(_channel_id, _thread_ts, _workflow_key):
+                return "200.9"
+
+            adapter.find_message_by_workflow_key = find_message
+            self.plugin._AUTOMATION = automation
+            delivery_key = f"proposal:{proposal['id']}:summary"
+            with automation.connect_db(database) as db:
+                automation.claim_slack_delivery(
+                    db,
+                    delivery_key=delivery_key,
+                    kind="proposal_summary",
+                    workspace_id="T_TEST",
+                    channel_id="D_OWNER",
+                    thread_ts=None,
+                    claimant="crashed-worker",
+                    lease_seconds=-1,
+                    conversation_id=conversation_id,
+                    proposal_id=proposal["id"],
+                    metadata_key=delivery_key,
+                )
+            result = {
+                "conversation_id": conversation_id,
+                "proposal_id": proposal["id"],
+                "revision_token": proposal["revision_token"],
+            }
+            with patch.dict(
+                os.environ, {"REVIEW_HISTORY_DB": str(database)}, clear=False
+            ):
+                asyncio.run(self.plugin._deliver_proposal(adapter, "T_TEST", result))
+            with automation.connect_db(database) as db:
+                delivery = db.execute(
+                    "SELECT state, message_ts FROM slack_deliveries"
+                ).fetchone()
+                conversation = db.execute(
+                    "SELECT thread_ts FROM workflow_pr_conversations WHERE id = ?",
+                    (conversation_id,),
+                ).fetchone()
+
+        self.assertEqual(adapter.sent, [])
+        self.assertEqual(delivery["state"], "sent")
+        self.assertEqual(delivery["message_ts"], "200.9")
+        self.assertEqual(conversation["thread_ts"], "200.9")
+
     def test_public_verdict_is_created_once_then_edited_with_derived_reaction(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "reviews.sqlite3"
@@ -603,6 +677,68 @@ class SlackReviewPolicyTests(unittest.TestCase):
         self.assertIn("2 comments", adapter.edited[0][2])
         self.assertIn("eyes", [item[2] for item in adapter.added_reactions])
         self.assertIn("white_check_mark", [item[2] for item in adapter.added_reactions])
+
+    def test_sent_verdict_receipt_is_bound_without_reposting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                request_id, _ = automation.get_or_create_source_request(
+                    db,
+                    workspace_id="T_TEST",
+                    channel_id="C_REVIEW",
+                    message_ts="100.1",
+                    requester_user_id="U_REVIEWER",
+                )
+                conversation_id, _ = automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T_TEST",
+                    owner_user_id="U_OWNER",
+                    repo="acme/api",
+                    pr_number=1,
+                    pr_url="https://github.com/acme/api/pull/1",
+                )
+                automation.associate_request_conversation(
+                    db, request_id, conversation_id, position=0
+                )
+                automation.update_request_member_outcome(
+                    db,
+                    conversation_id=conversation_id,
+                    outcome="approved",
+                    reviewed_head="a" * 40,
+                )
+                delivery_id, state = automation.claim_slack_delivery(
+                    db,
+                    delivery_key=f"request:{request_id}:verdict",
+                    kind="source_verdict",
+                    workspace_id="T_TEST",
+                    channel_id="C_REVIEW",
+                    thread_ts="100.1",
+                    claimant="slack-review-gate",
+                    request_id=request_id,
+                    metadata_key=f"request:{request_id}:verdict",
+                )
+                self.assertEqual(state, "claimed")
+                automation.complete_slack_delivery(
+                    db,
+                    delivery_id=delivery_id,
+                    claimant="slack-review-gate",
+                    message_ts="300.1",
+                )
+            adapter = FakeSlackAdapter()
+            self.plugin._AUTOMATION = automation
+            with patch.dict(
+                os.environ, {"REVIEW_HISTORY_DB": str(database)}, clear=False
+            ):
+                asyncio.run(self.plugin._project_request(adapter, request_id))
+            with automation.connect_db(database) as db:
+                verdict_ts = db.execute(
+                    "SELECT verdict_message_ts FROM workflow_source_requests "
+                    "WHERE id = ?",
+                    (request_id,),
+                ).fetchone()[0]
+
+        self.assertEqual(adapter.sent, [])
+        self.assertEqual(verdict_ts, "300.1")
 
 
 if __name__ == "__main__":

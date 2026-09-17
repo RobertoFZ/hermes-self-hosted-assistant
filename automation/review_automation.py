@@ -28,6 +28,13 @@ DEFAULT_SCHEMA = "/opt/review-automation/review-result.schema.json"
 PASEO_REVIEW_LABEL = "hermes-review-run"
 REVISION_TOKEN_PATTERN = r"P[1-9][0-9]*"
 CANDIDATE_TOKEN_PATTERN = r"C[1-9][0-9]*"
+CRITICAL_REVIEW_CATEGORIES = {
+    "correctness",
+    "security",
+    "migration_safety",
+    "test_coverage",
+}
+BLOCKING_REVIEW_SEVERITIES = {"blocker", "major"}
 TERMINAL_COMMAND_RE = re.compile(
     rf"^(?P<action>approve|skip) (?P<revision>{REVISION_TOKEN_PATTERN})$"
 )
@@ -1398,10 +1405,12 @@ def claim_analysis_attempt(
     *,
     claimant: str,
     now: datetime | None = None,
-    lease_seconds: int = 900,
+    lease_seconds: int | None = None,
 ) -> tuple[str, str]:
     """Claim one analysis lease, returning (claim state, attempt id)."""
     moment = now or utc_now()
+    if lease_seconds is None:
+        lease_seconds = analysis_lease_seconds()
     stamp = iso(moment)
     expires = iso(moment + timedelta(seconds=lease_seconds))
     try:
@@ -1476,9 +1485,11 @@ def heartbeat_analysis_attempt(
     attempt_id: str,
     claimant: str,
     now: datetime | None = None,
-    lease_seconds: int = 900,
+    lease_seconds: int | None = None,
 ) -> None:
     moment = now or utc_now()
+    if lease_seconds is None:
+        lease_seconds = analysis_lease_seconds()
     cursor = db.execute(
         """
         UPDATE analysis_attempts
@@ -2472,6 +2483,57 @@ def reminder_sweep(
     with connect_db(db_path) as db:
         reclaimed, reclaim_errors = _reclaim_expired_analysis_live(db, now=moment)
         errors.extend(reclaim_errors)
+        for recovery in reclaimed:
+            proposal_id = str(
+                recovery.get("new_proposal_id") or recovery.get("proposal_id") or ""
+            )
+            row = db.execute(
+                """
+                SELECT p.*, c.pr_url
+                FROM proposal_revisions p
+                JOIN workflow_pr_conversations c ON c.id = p.conversation_id
+                WHERE p.id = ?
+                """,
+                (proposal_id,),
+            ).fetchone()
+            if row is None:
+                errors.append(
+                    {"proposal_id": proposal_id, "error": "recovered proposal is missing"}
+                )
+                continue
+            proposal = _row_dict(row)
+            try:
+                pr = load_pr(str(row["pr_url"]))
+                if pr.state in {"MERGED", "CLOSED"}:
+                    lifecycle.append(
+                        finalize_external_pr(
+                            db,
+                            conversation_id=str(row["conversation_id"]),
+                            pr=pr,
+                        )
+                    )
+                elif pr.head_sha != str(row["head_sha"]):
+                    lifecycle.append(
+                        re_review_current_head(
+                            db,
+                            conversation_id=str(row["conversation_id"]),
+                            pr=pr,
+                            login=reviewer_login(),
+                            claimant=f"{claimant}:recovery-head",
+                        )
+                    )
+                else:
+                    lifecycle.append(
+                        analyze_proposal_revision(
+                            db,
+                            pr=pr,
+                            login=reviewer_login(),
+                            proposal=proposal,
+                            claimant=f"{claimant}:recovery",
+                        )
+                    )
+            except (AutomationError, OSError, subprocess.TimeoutExpired) as exc:
+                errors.append({"pr_url": str(row["pr_url"]), "error": str(exc)})
         claims = claim_due_reminders(
             db,
             claimant=claimant,
@@ -2760,6 +2822,12 @@ def paseo_timeout_seconds(value: str) -> int:
         raise AutomationError("REVIEW_PASEO_TIMEOUT must look like 30m, 1h, or 90s")
     multiplier = {"s": 1, "m": 60, "h": 3600}[match.group(2)]
     return int(match.group(1)) * multiplier
+
+
+def analysis_lease_seconds() -> int:
+    """Keep a claim alive beyond the longest configured Paseo wait."""
+    timeout_value = os.environ.get("REVIEW_PASEO_TIMEOUT", "45m")
+    return paseo_timeout_seconds(timeout_value) + 120
 
 
 def paseo_host() -> str:
@@ -3109,6 +3177,17 @@ def validate_proposal_result(result: Mapping[str, Any], pr: PullRequest) -> None
         raise AutomationError("Codex proposal objective is required")
     if not isinstance(result.get("findings"), list):
         raise AutomationError("Codex proposal findings must be a list")
+    if str(result.get("event")) == "APPROVE":
+        blocking = [
+            finding
+            for finding in result["findings"]
+            if str(finding.get("category") or "") in CRITICAL_REVIEW_CATEGORIES
+            or str(finding.get("severity") or "") in BLOCKING_REVIEW_SEVERITIES
+        ]
+        if blocking:
+            raise AutomationError(
+                "Codex proposal cannot approve while gate-blocking findings remain"
+            )
 
 
 def validate_delta_result(
@@ -3128,20 +3207,6 @@ def validate_delta_result(
     if not isinstance(delta, Mapping):
         raise AutomationError("Codex proposal delta is required")
     status = str(delta.get("status") or "")
-    if baseline_head_sha is None:
-        if status != "initial":
-            raise AutomationError("initial proposal must have initial delta status")
-        return
-
-    expected_status = (
-        "available"
-        if str((compare_context or {}).get("status")) == "available"
-        else "unavailable"
-    )
-    if status != expected_status:
-        raise AutomationError(
-            f"Codex delta status {status or 'missing'} does not match {expected_status} comparison"
-        )
     groups: dict[str, list[str]] = {}
     for key in (
         "addressed_candidate_ids",
@@ -3161,10 +3226,33 @@ def validate_delta_result(
     if len(classified) != len(set(classified)):
         raise AutomationError("Codex delta candidate classifications overlap")
 
-    prior_ids = {str(item.get("candidate_id") or "") for item in prior_findings}
-    current_ids = {
+    current_candidates = [
         str(item.get("candidate_id") or "") for item in result.get("findings") or []
-    }
+    ]
+    if any(re.fullmatch(CANDIDATE_TOKEN_PATTERN, item) is None for item in current_candidates):
+        raise AutomationError("Codex proposal candidate IDs are invalid")
+    if len(current_candidates) != len(set(current_candidates)):
+        raise AutomationError("Codex proposal candidate IDs contain duplicates")
+    current_ids = set(current_candidates)
+    if baseline_head_sha is None:
+        if status != "initial":
+            raise AutomationError("initial proposal must have initial delta status")
+        if groups["addressed_candidate_ids"] or groups["still_open_candidate_ids"]:
+            raise AutomationError("initial delta cannot classify prior findings")
+        if set(groups["new_candidate_ids"]) != current_ids:
+            raise AutomationError("initial delta must classify every finding as new")
+        return
+
+    expected_status = (
+        "available"
+        if str((compare_context or {}).get("status")) == "available"
+        else "unavailable"
+    )
+    if status != expected_status:
+        raise AutomationError(
+            f"Codex delta status {status or 'missing'} does not match {expected_status} comparison"
+        )
+    prior_ids = {str(item.get("candidate_id") or "") for item in prior_findings}
     if status == "unavailable":
         if groups["addressed_candidate_ids"] or groups["still_open_candidate_ids"]:
             raise AutomationError("unavailable delta must not guess prior finding outcomes")
@@ -3766,6 +3854,7 @@ def analyze_proposal_revision(
     login: str,
     proposal: Mapping[str, Any],
     claimant: str,
+    follow_head_changes: bool = True,
 ) -> dict[str, Any]:
     """Run one read-only analysis and persist it only if the target head stays current."""
     conversation_id = str(proposal["conversation_id"])
@@ -3793,7 +3882,7 @@ def analyze_proposal_revision(
     claim_state, attempt_id = claim_analysis_attempt(
         db, str(proposal["id"]), claimant=claimant
     )
-    if claim_state != "claimed":
+    if claim_state == "in_progress":
         return {
             "url": pr.url,
             "status": "in_progress",
@@ -3804,13 +3893,24 @@ def analyze_proposal_revision(
         }
     cleanup_warnings: list[str] = []
     try:
-        result = invoke_codex(
-            pr,
-            run_id=str(proposal["id"]),
-            baseline_head_sha=baseline,
-            prior_findings=prior_findings,
-            compare_context=compare_context,
-        )
+        if claim_state == "output_ready":
+            stored = db.execute(
+                "SELECT output FROM analysis_attempts WHERE id = ?",
+                (attempt_id,),
+            ).fetchone()
+            if stored is None or not stored["output"]:
+                raise AutomationError("recovered analysis output is missing")
+            result = json.loads(str(stored["output"]))
+            if not isinstance(result, dict):
+                raise AutomationError("recovered analysis output is not an object")
+        else:
+            result = invoke_codex(
+                pr,
+                run_id=str(proposal["id"]),
+                baseline_head_sha=baseline,
+                prior_findings=prior_findings,
+                compare_context=compare_context,
+            )
         if pr.author_login.lower() == login.lower() and result.get("event") == "APPROVE":
             result = dict(result)
             result["event"] = "COMMENT"
@@ -3825,7 +3925,8 @@ def analyze_proposal_revision(
             prior_findings=prior_findings,
             compare_context=compare_context,
         )
-        record_analysis_output(db, attempt_id=attempt_id, output=result)
+        if claim_state == "claimed":
+            record_analysis_output(db, attempt_id=attempt_id, output=result)
 
         latest_pr = load_pr(pr.url)
         if (
@@ -3846,18 +3947,31 @@ def analyze_proposal_revision(
                 attempt_id=attempt_id,
                 latest_pr=latest_pr,
             )
+            queued_result: dict[str, Any] = {
+                "status": "queued",
+                "proposal_id": str(queued["id"]),
+                "revision_token": str(queued["revision_token"]),
+                "baseline_head_sha": queued["baseline_head_sha"],
+                "head_sha": latest_pr.head_sha,
+            }
+            if follow_head_changes:
+                try:
+                    queued_result = analyze_proposal_revision(
+                        db,
+                        pr=latest_pr,
+                        login=login,
+                        proposal=queued,
+                        claimant=f"{claimant}:latest-head",
+                        follow_head_changes=False,
+                    )
+                except (AutomationError, OSError, subprocess.TimeoutExpired) as exc:
+                    queued_result["error"] = str(exc)
             return {
                 "url": latest_pr.url,
                 "status": "head_changed_during_analysis",
                 "conversation_id": conversation_id,
                 "superseded_head": pr.head_sha,
-                "re_review": {
-                    "status": "queued",
-                    "proposal_id": str(queued["id"]),
-                    "revision_token": str(queued["revision_token"]),
-                    "baseline_head_sha": queued["baseline_head_sha"],
-                    "head_sha": latest_pr.head_sha,
-                },
+                "re_review": queued_result,
             }
 
         delta = result.get("delta") or {}
@@ -3926,7 +4040,7 @@ def propose_one(
         return {"url": pr.url, "status": f"pr_{pr.state.lower()}", "head_sha": pr.head_sha}
     current = active_proposal(db, conversation_id)
     if current is not None and str(current["head_sha"]) == pr.head_sha:
-        if str(current["state"]) == "queued":
+        if str(current["state"]) in {"queued", "output_pending"}:
             return analyze_proposal_revision(
                 db,
                 pr=pr,
@@ -4223,6 +4337,29 @@ def re_review_current_head(
         head_sha=pr.head_sha,
         baseline_head_sha=baseline,
     )
+    if proposal.get("created"):
+        stamp = iso(utc_now())
+        with db:
+            db.execute(
+                """
+                UPDATE workflow_request_members
+                SET state = 'analyzing', outcome = NULL, reviewed_head = ?,
+                    published_comment_count = 0, error = NULL, updated_at = ?
+                WHERE conversation_id = ?
+                  AND state NOT IN ('merged_externally', 'closed_externally')
+                """,
+                (pr.head_sha, stamp, conversation_id),
+            )
+            request_ids = [
+                str(row["request_id"])
+                for row in db.execute(
+                    "SELECT request_id FROM workflow_request_members "
+                    "WHERE conversation_id = ?",
+                    (conversation_id,),
+                ).fetchall()
+            ]
+            for request_id in request_ids:
+                _refresh_source_request_locked(db, request_id, stamp=stamp)
     if not proposal.get("created") and str(proposal["state"]) != "queued":
         return {
             "url": pr.url,
@@ -4528,7 +4665,23 @@ def execute_thread_command(
         comment_count=receipt["comment_count"],
         receipt=receipt,
     )
-    return _action_receipt(db, action_id)
+    completed = _action_receipt(db, action_id)
+    if receipt["head_changed_after_write"] and post_write.state == "OPEN":
+        try:
+            completed["re_review"] = re_review_current_head(
+                db,
+                conversation_id=str(action_row["conversation_id"]),
+                pr=post_write,
+                login=login,
+                claimant="post-write-re-review",
+            )
+        except (AutomationError, OSError, subprocess.TimeoutExpired) as exc:
+            completed["re_review"] = {
+                "status": "failed",
+                "head_sha": post_write.head_sha,
+                "error": str(exc),
+            }
+    return completed
 
 
 def decide_thread_command(

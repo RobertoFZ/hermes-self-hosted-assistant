@@ -67,12 +67,6 @@ SPANISH_HINTS = re.compile(
     r"índice|indice|sin|cambiar|comportamiento|puedes|podr)\b",
     re.IGNORECASE,
 )
-# Acknowledgments / filler that must NOT appear in the terse top-level comment.
-ACK_PATTERNS = re.compile(
-    r"(gracias|buen trabajo|buena pr|excelente|felicidades|enhorabuena|"
-    r"no lo apruebo todav|aprecio|qué bueno|que bueno|sigue así|sigue asi|🙏|👍)",
-    re.IGNORECASE,
-)
 MECHANICAL_PATTERNS = re.compile(
     r"(assert(?:ion)?\s+(?:phase|placement|constant)|magic\s+(?:value|number)"
     r"|one[- ]use\s+helper|single[- ]use\s+helper|extract(?:ing)?\s+(?:this\s+)?"

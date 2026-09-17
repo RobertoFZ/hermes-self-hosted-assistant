@@ -90,12 +90,6 @@ _BOT_REVIEW_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 _USER_MENTION_RE = re.compile(r"<@(?P<user>[A-Z0-9_]+)(?:\|[^>]+)?>")
-_COMMAND_RE = re.compile(
-    r"(?:approve P[1-9][0-9]*|skip P[1-9][0-9]*|"
-    r"(?:publish|dismiss) P[1-9][0-9]*(?: C[1-9][0-9]*)+|"
-    r"edit P[1-9][0-9]* C[1-9][0-9]*: \S(?:.*\S)?)$"
-)
-
 _DISPATCHED_EVENT_KEYS: set[tuple[str, str, str]] = set()
 _DISPATCHED_EVENT_ORDER: list[tuple[str, str, str]] = []
 _DISPATCH_CACHE_LIMIT = 2048
@@ -207,10 +201,6 @@ def _targets_competing_bot(event: Any, gateway: Any = None) -> bool:
     return bool(mentions & COMPETING_BOT_USER_IDS) and not _mentions_this_bot(event, gateway)
 
 
-def _owner_mentioned_bot(user_id: str, event: Any, gateway: Any = None) -> bool:
-    return user_id in OWNER_USER_IDS and _mentions_this_bot(event, gateway)
-
-
 def _automation_module() -> Any:
     global _AUTOMATION
     if _AUTOMATION is not None:
@@ -255,7 +245,7 @@ def _lookup_private_route(source: Any) -> dict[str, Any] | None:
 
 
 def _is_exact_command(text: str) -> bool:
-    return _COMMAND_RE.fullmatch((text or "").strip()) is not None
+    return _automation_module().parse_decision_command(text) is not None
 
 
 def _intake_capacity_reason(user_id: str, url_count: int) -> str | None:
@@ -328,15 +318,7 @@ def _format_proposal(context: dict[str, Any]) -> str:
         f"Proposal: {action}",
         str(context.get("summary") or "Review proposal ready."),
     ]
-    delta = {}
-    try:
-        structured = context.get("structured_result")
-        if isinstance(structured, str):
-            import json
-            structured = json.loads(structured)
-        delta = (structured or {}).get("delta") or {}
-    except (TypeError, ValueError):
-        delta = {}
+    delta = context.get("delta") or {}
     if delta and str(delta.get("status")) != "initial":
         lines.append(
             "Delta: "
@@ -369,16 +351,130 @@ def _format_proposal(context: dict[str, Any]) -> str:
 
 async def _reconcile_delivery(
     adapter: Any, channel_id: str, thread_ts: str | None, workflow_key: str
-) -> str | None:
+) -> tuple[bool, str | None]:
     finder = getattr(adapter, "find_message_by_workflow_key", None)
     if finder is None:
-        return None
+        return False, None
     result = finder(channel_id, thread_ts, workflow_key)
     if inspect.isawaitable(result):
         result = await result
     if isinstance(result, dict):
-        return str(result.get("ts") or result.get("message_ts") or "") or None
-    return str(result or "") or None
+        message_ts = str(result.get("ts") or result.get("message_ts") or "") or None
+    else:
+        message_ts = str(result or "") or None
+    return True, message_ts
+
+
+async def _send_once(
+    adapter: Any,
+    *,
+    delivery_key: str,
+    kind: str,
+    workspace_id: str,
+    channel_id: str,
+    thread_ts: str | None,
+    content: str,
+    metadata: dict[str, Any],
+    request_id: str | None = None,
+    conversation_id: str | None = None,
+    proposal_id: str | None = None,
+) -> tuple[str | None, str, str | None]:
+    automation = _automation_module()
+    with automation.connect_db() as db:
+        existing = db.execute(
+            "SELECT * FROM slack_deliveries WHERE delivery_key = ?",
+            (delivery_key,),
+        ).fetchone()
+        if existing is not None:
+            kind = str(existing["kind"])
+            channel_id = str(existing["channel_id"])
+            thread_ts = (
+                str(existing["thread_ts"])
+                if existing["thread_ts"] is not None
+                else None
+            )
+        delivery_id, state = automation.claim_slack_delivery(
+            db,
+            delivery_key=delivery_key,
+            kind=kind,
+            workspace_id=workspace_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            claimant="slack-review-gate",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            proposal_id=proposal_id,
+            metadata_key=delivery_key,
+        )
+        if state == "sent":
+            row = db.execute(
+                "SELECT message_ts FROM slack_deliveries WHERE id = ?",
+                (delivery_id,),
+            ).fetchone()
+            return str(row["message_ts"] or "") or None, channel_id, thread_ts
+    if state != "claimed":
+        return None, channel_id, thread_ts
+
+    if existing is not None:
+        supported, message_ts = await _reconcile_delivery(
+            adapter, channel_id, thread_ts, delivery_key
+        )
+        if message_ts:
+            with automation.connect_db() as db:
+                automation.complete_slack_delivery(
+                    db,
+                    delivery_id=delivery_id,
+                    claimant="slack-review-gate",
+                    message_ts=message_ts,
+                )
+            return message_ts, channel_id, thread_ts
+        if not supported:
+            with automation.connect_db() as db:
+                automation.block_slack_delivery(
+                    db,
+                    delivery_id=delivery_id,
+                    claimant="slack-review-gate",
+                    error="Slack delivery receipt is ambiguous and cannot be reconciled",
+                )
+            return None, channel_id, thread_ts
+
+    response = await adapter.send(
+        channel_id,
+        content,
+        reply_to=thread_ts,
+        metadata={
+            **metadata,
+            "workflow_key": delivery_key,
+            "thread_id": thread_ts or "",
+            "thread_ts": thread_ts or "",
+        },
+    )
+    message_ts = str(getattr(response, "message_id", "") or "")
+    raw = getattr(response, "raw_response", None)
+    if isinstance(raw, dict):
+        channel_id = str(raw.get("channel") or channel_id)
+        message_ts = str(raw.get("ts") or message_ts)
+    if not getattr(response, "success", False) or not message_ts:
+        _, recovered_ts = await _reconcile_delivery(
+            adapter, channel_id, thread_ts, delivery_key
+        )
+        message_ts = recovered_ts or ""
+    with automation.connect_db() as db:
+        if message_ts:
+            automation.complete_slack_delivery(
+                db,
+                delivery_id=delivery_id,
+                claimant="slack-review-gate",
+                message_ts=message_ts,
+            )
+        else:
+            automation.block_slack_delivery(
+                db,
+                delivery_id=delivery_id,
+                claimant="slack-review-gate",
+                error=str(getattr(response, "error", "ambiguous Slack delivery")),
+            )
+    return message_ts or None, channel_id, thread_ts
 
 
 async def _deliver_proposal(adapter: Any, workspace_id: str, result: dict[str, Any]) -> None:
@@ -401,7 +497,8 @@ async def _deliver_proposal(adapter: Any, workspace_id: str, result: dict[str, A
         )
         context["conversation"] = conversation
     content = _format_proposal(context)
-    metadata = {"scope_id": workspace_id, "workflow_key": f"proposal:{proposal_id}"}
+    workflow_key = f"proposal:{proposal_id}:summary"
+    metadata = {"scope_id": workspace_id}
     channel_id = str(conversation.get("dm_channel_id") or "")
     thread_ts = str(conversation.get("thread_ts") or "") or None
     if not channel_id:
@@ -410,73 +507,45 @@ async def _deliver_proposal(adapter: Any, workspace_id: str, result: dict[str, A
             channel_id = str(await resolver(DECISION_OWNER_USER_ID, metadata))
         else:
             channel_id = DECISION_OWNER_USER_ID
-    workflow_key = f"proposal:{proposal_id}:summary"
-    with automation.connect_db() as db:
-        existing_delivery = db.execute(
-            "SELECT state FROM slack_deliveries WHERE delivery_key = ?",
-            (workflow_key,),
-        ).fetchone()
-        if existing_delivery is not None:
-            # A root delivery is intentionally bound to thread_ts=NULL forever.
-            # Once its receipt exists, the now-bound conversation must not turn
-            # a replay into a differently routed delivery attempt.
-            return
-        delivery_id, state = automation.claim_slack_delivery(
-            db,
-            delivery_key=workflow_key,
-            kind="proposal_summary" if thread_ts is None else "proposal_revision",
-            workspace_id=workspace_id,
-            channel_id=channel_id,
-            thread_ts=thread_ts,
-            claimant="slack-review-gate",
-            conversation_id=conversation_id,
-            proposal_id=proposal_id,
-            metadata_key=workflow_key,
-        )
-    if state != "claimed":
-        return
-    send_metadata = {
-        **metadata,
-        "thread_id": thread_ts or "",
-        "thread_ts": thread_ts or "",
-    }
-    response = await adapter.send(
-        channel_id,
-        content,
-        reply_to=thread_ts,
-        metadata=send_metadata,
+    message_ts, channel_id, delivery_thread_ts = await _send_once(
+        adapter,
+        delivery_key=workflow_key,
+        kind="proposal_summary" if thread_ts is None else "proposal_revision",
+        workspace_id=workspace_id,
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        content=content,
+        metadata=metadata,
+        conversation_id=conversation_id,
+        proposal_id=proposal_id,
     )
-    message_ts = str(getattr(response, "message_id", "") or "")
-    raw = getattr(response, "raw_response", None)
-    if isinstance(raw, dict):
-        channel_id = str(raw.get("channel") or channel_id)
-        message_ts = str(raw.get("ts") or message_ts)
-    if not getattr(response, "success", False) or not message_ts:
-        message_ts = await _reconcile_delivery(
-            adapter, channel_id, thread_ts, workflow_key
-        ) or ""
-    with automation.connect_db() as db:
-        if message_ts:
-            automation.complete_slack_delivery(
-                db,
-                delivery_id=delivery_id,
-                claimant="slack-review-gate",
-                message_ts=message_ts,
-            )
-            if thread_ts is None:
+    if message_ts and delivery_thread_ts is None:
+        with automation.connect_db() as db:
+            current = db.execute(
+                "SELECT thread_ts FROM workflow_pr_conversations WHERE id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if current is not None and current["thread_ts"] is None:
                 automation.bind_pr_conversation_thread(
                     db,
                     conversation_id,
                     dm_channel_id=channel_id,
                     thread_ts=message_ts,
                 )
-        else:
-            automation.block_slack_delivery(
-                db,
-                delivery_id=delivery_id,
-                claimant="slack-review-gate",
-                error=str(getattr(response, "error", "ambiguous Slack delivery")),
-            )
+
+
+def _ready_proposal_result(result: dict[str, Any]) -> dict[str, Any] | None:
+    """Return only a fully persisted proposal that can be rendered safely."""
+    if result.get("status") == "awaiting_decision" and result.get("proposal_id"):
+        return result
+    re_review = result.get("re_review")
+    if (
+        isinstance(re_review, dict)
+        and re_review.get("status") == "awaiting_decision"
+        and re_review.get("proposal_id")
+    ):
+        return re_review
+    return None
 
 
 def _render_verdict(projection: dict[str, Any]) -> str:
@@ -509,18 +578,25 @@ async def _project_request(adapter: Any, request_id: str) -> None:
         response = await adapter.edit_message(
             channel_id, verdict_ts, content, finalize=True, metadata=metadata
         )
+        if not getattr(response, "success", False):
+            logger.warning("Unable to project source review verdict")
     else:
-        response = await adapter.send(
-            channel_id, content, reply_to=message_ts, metadata=metadata
+        verdict_ts, _, _ = await _send_once(
+            adapter,
+            delivery_key=f"request:{request_id}:verdict",
+            kind="source_verdict",
+            workspace_id=workspace_id,
+            channel_id=channel_id,
+            thread_ts=message_ts,
+            content=content,
+            metadata=metadata,
+            request_id=request_id,
         )
-        verdict_ts = str(getattr(response, "message_id", "") or "")
-        if getattr(response, "success", False) and verdict_ts:
+        if verdict_ts:
             with automation.connect_db() as db:
                 automation.bind_source_verdict(
                     db, request_id=request_id, verdict_message_ts=verdict_ts
                 )
-    if not getattr(response, "success", False):
-        logger.warning("Unable to project source review verdict")
     await _set_request_reaction(
         adapter,
         channel_id,
@@ -535,7 +611,6 @@ async def _run_source_request(
     source: Any,
     event: Any,
     urls: list[str],
-    _allow_self_review: bool,
 ) -> None:
     user_id = str(getattr(source, "user_id", "") or "")
     workspace_id = str(getattr(source, "scope_id", "") or "")
@@ -588,7 +663,9 @@ async def _run_source_request(
                 failed = True
                 logger.warning("Private PR proposal failed: %s", result)
                 continue
-            await _deliver_proposal(adapter, workspace_id, result)
+            ready = _ready_proposal_result(result)
+            if ready is not None:
+                await _deliver_proposal(adapter, workspace_id, ready)
         if failed:
             await _set_request_reaction(adapter, channel_id, message_ts, workspace_id, "warning")
         else:
@@ -640,7 +717,10 @@ async def _run_owner_command(adapter: Any, source: Any, event: Any) -> None:
             metadata={"scope_id": workspace_id, "thread_id": thread_ts, "thread_ts": thread_ts},
         )
         re_review = result.get("re_review")
-        if isinstance(re_review, dict) and re_review.get("proposal_id"):
+        if (
+            isinstance(re_review, dict)
+            and _ready_proposal_result(re_review) is not None
+        ):
             await _deliver_proposal(adapter, workspace_id, re_review)
         route = _lookup_private_route(source)
         conversation_id = str((route or {}).get("id") or "")
@@ -665,13 +745,13 @@ async def _run_owner_command(adapter: Any, source: Any, event: Any) -> None:
 
 
 def _schedule_source_request(
-    gateway: Any, source: Any, event: Any, urls: list[str], allow_self_review: bool
+    gateway: Any, source: Any, event: Any, urls: list[str]
 ) -> None:
     adapter = _adapter_for(gateway, source)
     if adapter is None:
         logger.warning("Slack adapter unavailable for private PR proposal")
         return
-    _track_task(_run_source_request(adapter, source, event, urls, allow_self_review))
+    _track_task(_run_source_request(adapter, source, event, urls))
 
 
 def _schedule_owner_command(gateway: Any, source: Any, event: Any) -> None:
@@ -755,7 +835,6 @@ def _review_only_policy(event: Any, gateway: Any = None, **_kwargs: Any):
         source,
         event,
         urls,
-        _owner_mentioned_bot(user_id, event, gateway),
     )
     return {"action": "skip", "reason": "review-scheduled"}
 
