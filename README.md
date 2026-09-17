@@ -330,8 +330,9 @@ removes the baseline produces a full current-head proposal labeled
 An unanswered proposal gets a private thread reminder after two working hours,
 counted Monday-Friday from 09:00 to 18:00 in `TZ`. It gets one final reminder at
 09:00 on the next working day and then appears only in the daily private digest.
-No timeout can approve, publish, skip, create another top-level DM, or post a
-public reminder.
+No reminder timeout can approve, publish, skip, create another top-level DM, or
+post a public reminder. The recovery sweep may create the original top-level DM
+only when analysis finished but its first summary was never sent.
 
 ### Recovery and privacy boundary
 
@@ -342,6 +343,12 @@ If the send cannot be proven present or absent, the delivery becomes
 resolve the stored receipt deliberately. Do not replay the request, delete the
 row, or post the private proposal in the review channel. A verdict edit failure
 also never falls back to a second public verdict.
+
+If a restart strands completed analysis before its first Slack summary, the
+reminder sweep resumes that proposal and sends the summary once to the
+configured decision owner. Its receipt establishes the same stable PR thread
+that normal intake would have created; it never uses the source channel or cron
+delivery target.
 
 GitHub actions are commit-bound and reconciled by their publication receipts.
 When a private result says `recovery_required`, fix the reported GitHub/auth

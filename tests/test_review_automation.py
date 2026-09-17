@@ -1551,6 +1551,59 @@ class ReviewAutomationTests(unittest.TestCase):
                 ).fetchone()
             self.assertEqual(reminder["state"], "blocked")
 
+    def test_due_reminder_head_drift_emits_the_re_review_summary(self):
+        now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+        old_head = "a" * 40
+        new_head = "b" * 40
+        pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/42",
+            repo="acme/api",
+            number=42,
+            title="API",
+            body="",
+            head_sha=new_head,
+            base_ref="main",
+            author_login="developer",
+        )
+        result = self._delta_result(
+            head_sha=new_head,
+            baseline_head_sha=old_head,
+            addressed=("C1", "C2"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                _, proposal, _ = self._ready_proposal(db, head_sha=old_head)
+                automation.schedule_proposal_reminder(
+                    db, proposal["id"], due_at=now - timedelta(minutes=1)
+                )
+            with patch.object(
+                automation, "load_pr", return_value=pr
+            ), patch.object(
+                automation, "reviewer_login", return_value="review-bot"
+            ), patch.object(
+                automation,
+                "github_compare_context",
+                return_value={"status": "available"},
+            ), patch.object(
+                automation, "invoke_codex", return_value=result
+            ), patch.object(
+                automation, "cleanup_paseo_review_agent", return_value=[]
+            ):
+                sweep = automation.reminder_sweep(
+                    str(database), claimant="cron-head-drift", now=now
+                )
+
+        self.assertEqual(sweep["deliveries"], [])
+        self.assertEqual(sweep["proposal_delivery_count"], 1)
+        delivery = sweep["proposal_deliveries"][0]
+        self.assertEqual(delivery["revision_token"], "P2")
+        self.assertEqual(delivery["target_kind"], "channel")
+        self.assertEqual(
+            (delivery["channel_id"], delivery["thread_ts"]),
+            ("D1", "1720000000.000100"),
+        )
+
     def test_digest_lists_digest_only_proposals_without_counting_as_reviews(self):
         now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
@@ -1708,6 +1761,149 @@ class ReviewAutomationTests(unittest.TestCase):
 
         self.assertEqual(recovered["status"], "awaiting_decision")
         invoke.assert_not_called()
+
+    def test_next_sweep_resumes_output_pending_after_recovery_crash(self):
+        now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+        pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/42",
+            repo="acme/api",
+            number=42,
+            title="API",
+            body="",
+            head_sha="a" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        result = self._delta_result(
+            head_sha=pr.head_sha,
+            baseline_head_sha=None,
+            status="initial",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, _ = automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T1",
+                    owner_user_id="U_OWNER",
+                    repo=pr.repo,
+                    pr_number=pr.number,
+                    pr_url=pr.url,
+                )
+                proposal = automation.create_proposal_revision(
+                    db, conversation_id, head_sha=pr.head_sha
+                )
+                _, attempt_id = automation.claim_analysis_attempt(
+                    db,
+                    proposal["id"],
+                    claimant="worker",
+                    now=now - timedelta(minutes=10),
+                    lease_seconds=60,
+                )
+                automation.record_analysis_output(
+                    db,
+                    attempt_id=attempt_id,
+                    output=result,
+                    now=now - timedelta(minutes=8),
+                )
+                automation.reclaim_expired_analysis(
+                    db,
+                    current_heads={(pr.repo, pr.number): pr.head_sha},
+                    now=now,
+                )
+
+            with patch.object(
+                automation, "load_pr", return_value=pr
+            ), patch.object(
+                automation, "reviewer_login", return_value="review-bot"
+            ), patch.object(
+                automation, "invoke_codex"
+            ) as invoke, patch.object(
+                automation, "cleanup_paseo_review_agent", return_value=[]
+            ):
+                sweep = automation.reminder_sweep(
+                    str(database), claimant="cron-recovery", now=now
+                )
+            with automation.connect_db(database) as db:
+                state = db.execute(
+                    "SELECT state FROM proposal_revisions WHERE id = ?",
+                    (proposal["id"],),
+                ).fetchone()[0]
+            self.assertEqual(sweep["lifecycle"][0]["status"], "awaiting_decision")
+            self.assertEqual(state, "awaiting_decision")
+            self.assertEqual(sweep["proposal_delivery_count"], 1)
+            delivery = sweep["proposal_deliveries"][0]
+            self.assertEqual(delivery["target_kind"], "owner_dm")
+            self.assertEqual(delivery["channel_id"], "U_OWNER")
+            ack = automation.ack_proposal_delivery(
+                str(database),
+                delivery_id=delivery["delivery_id"],
+                claimant=delivery["claimant"],
+                channel_id="D_OWNER",
+                message_ts="200.1",
+                now=now,
+            )
+            with automation.connect_db(database) as db:
+                conversation = db.execute(
+                    "SELECT dm_channel_id, thread_ts FROM workflow_pr_conversations "
+                    "WHERE id = ?",
+                    (conversation_id,),
+                ).fetchone()
+            self.assertEqual(ack["status"], "sent")
+            self.assertEqual(
+                (conversation["dm_channel_id"], conversation["thread_ts"]),
+                ("D_OWNER", "200.1"),
+            )
+            invoke.assert_not_called()
+
+    def test_sweep_dispatches_an_orphaned_queued_proposal(self):
+        now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+        pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/42",
+            repo="acme/api",
+            number=42,
+            title="API",
+            body="",
+            head_sha="a" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        result = self._delta_result(
+            head_sha=pr.head_sha,
+            baseline_head_sha=None,
+            status="initial",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, _ = automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T1",
+                    owner_user_id="U_OWNER",
+                    repo=pr.repo,
+                    pr_number=pr.number,
+                    pr_url=pr.url,
+                )
+                proposal = automation.create_proposal_revision(
+                    db, conversation_id, head_sha=pr.head_sha
+                )
+
+            with patch.object(
+                automation, "load_pr", return_value=pr
+            ), patch.object(
+                automation, "reviewer_login", return_value="review-bot"
+            ), patch.object(
+                automation, "invoke_codex", return_value=result
+            ) as invoke, patch.object(
+                automation, "cleanup_paseo_review_agent", return_value=[]
+            ):
+                sweep = automation.reminder_sweep(
+                    str(database), claimant="cron-recovery", now=now
+                )
+
+        self.assertEqual(sweep["lifecycle"][0]["status"], "awaiting_decision")
+        self.assertEqual(sweep["proposal_delivery_count"], 1)
+        invoke.assert_called_once()
 
     def test_exact_pr_urls_and_repository_allowlist_are_enforced(self):
         with patch.dict(

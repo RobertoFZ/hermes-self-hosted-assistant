@@ -2465,6 +2465,183 @@ def _reclaim_expired_analysis_live(
     return reclaimed, errors
 
 
+def _prepare_recovered_proposal_delivery(
+    db: sqlite3.Connection,
+    *,
+    result: Mapping[str, Any],
+    claimant: str,
+    now: datetime,
+    lease_seconds: int,
+) -> tuple[dict[str, Any] | None, str]:
+    ready = result
+    if str(result.get("status") or "") != "awaiting_decision":
+        nested = result.get("re_review")
+        if not isinstance(nested, Mapping) or str(nested.get("status") or "") != "awaiting_decision":
+            return None, "proposal is not ready for owner delivery"
+        ready = nested
+    proposal_id = str(ready.get("proposal_id") or "")
+    conversation_id = str(ready.get("conversation_id") or "")
+    revision_token = str(ready.get("revision_token") or "")
+    if not proposal_id or not conversation_id or not revision_token:
+        return None, "ready proposal delivery identity is incomplete"
+    conversation_row = db.execute(
+        "SELECT * FROM workflow_pr_conversations WHERE id = ?",
+        (conversation_id,),
+    ).fetchone()
+    if conversation_row is None:
+        return None, "proposal conversation is missing"
+    conversation = _row_dict(conversation_row)
+    context = proposal_context(
+        db,
+        conversation_id=conversation_id,
+        revision_token=revision_token,
+    )
+    context["conversation"] = conversation
+    delivery_key = f"proposal:{proposal_id}:summary"
+    existing = db.execute(
+        "SELECT * FROM slack_deliveries WHERE delivery_key = ?",
+        (delivery_key,),
+    ).fetchone()
+    thread_ts = str(conversation.get("thread_ts") or "") or None
+    channel_id = str(conversation.get("dm_channel_id") or "")
+    target_kind = "channel"
+    if not channel_id:
+        channel_id = str(conversation["owner_user_id"])
+        target_kind = "owner_dm"
+    if existing is not None:
+        channel_id = str(existing["channel_id"])
+        thread_ts = str(existing["thread_ts"] or "") or None
+        target_kind = "channel" if channel_id.startswith("D") else target_kind
+    delivery_id, state = claim_slack_delivery(
+        db,
+        delivery_key=delivery_key,
+        kind="proposal_summary" if thread_ts is None else "proposal_revision",
+        workspace_id=str(conversation["workspace_id"]),
+        channel_id=channel_id,
+        thread_ts=thread_ts,
+        claimant=claimant,
+        now=now,
+        lease_seconds=lease_seconds,
+        conversation_id=conversation_id,
+        proposal_id=proposal_id,
+        metadata_key=delivery_key,
+    )
+    if state == "sent":
+        receipt = db.execute(
+            "SELECT channel_id, thread_ts, message_ts FROM slack_deliveries WHERE id = ?",
+            (delivery_id,),
+        ).fetchone()
+        if (
+            receipt is not None
+            and receipt["message_ts"]
+            and conversation.get("thread_ts") is None
+        ):
+            bind_pr_conversation_thread(
+                db,
+                conversation_id,
+                dm_channel_id=str(receipt["channel_id"]),
+                thread_ts=str(receipt["message_ts"]),
+            )
+        return None, "proposal summary was already sent"
+    if state != "claimed":
+        return None, f"proposal summary delivery is {state}"
+    if existing is not None:
+        block_slack_delivery(
+            db,
+            delivery_id=delivery_id,
+            claimant=claimant,
+            error="expired proposal delivery receipt is ambiguous",
+            now=now,
+        )
+        return None, "expired proposal delivery requires operator reconciliation"
+    return (
+        {
+            "delivery_kind": "proposal_summary",
+            "delivery_id": delivery_id,
+            "delivery_key": delivery_key,
+            "claimant": claimant,
+            "workspace_id": str(conversation["workspace_id"]),
+            "target_kind": target_kind,
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+            "conversation_id": conversation_id,
+            "proposal_id": proposal_id,
+            "revision_token": revision_token,
+            "text": format_private_proposal(context),
+        },
+        "claimed",
+    )
+
+
+def ack_proposal_delivery(
+    db_path: str | None,
+    *,
+    delivery_id: str,
+    claimant: str,
+    channel_id: str,
+    message_ts: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Persist a recovered proposal DM receipt and bind its stable thread."""
+    stamp = iso(now or utc_now())
+    with connect_db(db_path) as db:
+        try:
+            _begin_immediate(db)
+            row = db.execute(
+                "SELECT conversation_id, thread_ts FROM slack_deliveries "
+                "WHERE id = ? AND claimant = ? AND state = 'sending'",
+                (delivery_id, claimant),
+            ).fetchone()
+            if row is None or not row["conversation_id"]:
+                raise AutomationError("proposal delivery is not owned by claimant")
+            root_thread = str(row["thread_ts"] or "") or message_ts
+            db.execute(
+                """
+                UPDATE slack_deliveries
+                SET state = 'sent', channel_id = ?, thread_ts = ?, message_ts = ?,
+                    lease_expires_at = NULL, updated_at = ?, error = NULL
+                WHERE id = ?
+                """,
+                (channel_id, row["thread_ts"], message_ts, stamp, delivery_id),
+            )
+            if row["thread_ts"] is None:
+                db.execute(
+                    """
+                    UPDATE workflow_pr_conversations
+                    SET dm_channel_id = ?, thread_ts = ?, updated_at = ?
+                    WHERE id = ? AND thread_ts IS NULL
+                    """,
+                    (channel_id, root_thread, stamp, row["conversation_id"]),
+                )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+    return {
+        "status": "sent",
+        "delivery_id": delivery_id,
+        "channel_id": channel_id,
+        "message_ts": message_ts,
+    }
+
+
+def block_proposal_delivery(
+    db_path: str | None,
+    *,
+    delivery_id: str,
+    claimant: str,
+    error: str,
+) -> dict[str, Any]:
+    with connect_db(db_path) as db:
+        block_slack_delivery(
+            db,
+            delivery_id=delivery_id,
+            claimant=claimant,
+            error=error[:4000],
+        )
+    return {"status": "blocked", "delivery_id": delivery_id}
+
+
 def reminder_sweep(
     db_path: str | None = None,
     *,
@@ -2477,16 +2654,31 @@ def reminder_sweep(
     """Claim due private reminders and emit exact persisted Slack delivery work."""
     moment = now or utc_now()
     deliveries: list[dict[str, Any]] = []
+    proposal_deliveries: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     lifecycle: list[dict[str, Any]] = []
     with connect_db(db_path) as db:
         reclaimed, reclaim_errors = _reclaim_expired_analysis_live(db, now=moment)
         errors.extend(reclaim_errors)
-        for recovery in reclaimed:
-            proposal_id = str(
-                recovery.get("new_proposal_id") or recovery.get("proposal_id") or ""
-            )
+        recovery_proposal_ids = [
+            str(item.get("new_proposal_id") or item.get("proposal_id") or "")
+            for item in reclaimed
+        ]
+        recovery_proposal_ids.extend(
+            str(row["id"])
+            for row in db.execute(
+                """
+                SELECT p.id
+                FROM proposal_revisions p
+                WHERE p.state IN ('queued', 'output_pending')
+                ORDER BY p.created_at, p.id
+                LIMIT ?
+                """,
+                (max(limit, 1),),
+            ).fetchall()
+        )
+        for proposal_id in dict.fromkeys(recovery_proposal_ids):
             row = db.execute(
                 """
                 SELECT p.*, c.pr_url
@@ -2588,11 +2780,34 @@ def reminder_sweep(
                 deliveries.append(item)
             else:
                 blocked.append({"reminder_id": reminder_id, "reason": reason})
+        for result in lifecycle:
+            item, reason = _prepare_recovered_proposal_delivery(
+                db,
+                result=result,
+                claimant=claimant,
+                now=moment,
+                lease_seconds=lease_seconds,
+            )
+            if item is not None:
+                proposal_deliveries.append(item)
+            elif reason not in {
+                "proposal is not ready for owner delivery",
+                "proposal summary was already sent",
+                "proposal summary delivery is in_progress",
+            }:
+                blocked.append(
+                    {
+                        "proposal_id": str(result.get("proposal_id") or ""),
+                        "reason": reason,
+                    }
+                )
     return {
         "status": "ready",
         "claimant": claimant,
         "deliveries": deliveries,
         "delivery_count": len(deliveries),
+        "proposal_deliveries": proposal_deliveries,
+        "proposal_delivery_count": len(proposal_deliveries),
         "blocked": blocked,
         "blocked_count": len(blocked),
         "reclaimed_analysis": reclaimed,
@@ -3751,6 +3966,54 @@ def proposal_context(
     }
     result["limitations"] = list(structured.get("limitations") or [])
     return result
+
+
+def format_private_proposal(context: Mapping[str, Any]) -> str:
+    """Render the canonical owner-only proposal summary."""
+    conversation = context.get("conversation") or {}
+    token = str(context.get("revision_token") or "")
+    head = str(context.get("head_sha") or "")
+    action = str(context.get("proposed_action") or "comment").upper()
+    lines = [
+        f"*{conversation.get('repo')} #{conversation.get('pr_number')} — {token}*",
+        f"Head: `{head[:12]}`",
+        f"Objective: {context.get('objective') or 'Not provided'}",
+        f"Proposal: {action}",
+        str(context.get("summary") or "Review proposal ready."),
+    ]
+    delta = context.get("delta") or {}
+    if delta and str(delta.get("status")) != "initial":
+        lines.append(
+            "Delta: "
+            + str(delta.get("status")).replace("_", " ")
+            + f" (baseline `{str(context.get('baseline_head_sha') or '')[:12]}`)"
+        )
+    findings = [
+        item for item in context.get("findings", []) if item.get("active", True)
+    ]
+    if findings:
+        lines.append("\n*Candidate comments*")
+        for finding in findings:
+            location = str(finding.get("path") or "general")
+            if finding.get("line") is not None:
+                location += f":{finding['line']}"
+            edited = " (edited)" if finding.get("edited") else ""
+            lines.append(
+                f"• `{finding.get('candidate_id')}` {finding.get('severity')} "
+                f"{location}{edited} — {finding.get('body')}"
+            )
+    else:
+        lines.append("No material candidate comments.")
+    commands = [f"`skip {token}`"]
+    if action == "APPROVE":
+        commands.insert(0, f"`approve {token}`")
+    if findings:
+        ids = " ".join(str(item["candidate_id"]) for item in findings)
+        commands.insert(0, f"`publish {token} {ids}`")
+    lines.append(
+        "Reply in this thread with questions, or use " + ", ".join(commands) + "."
+    )
+    return "\n".join(lines)
 
 
 def thread_context(
@@ -4951,6 +5214,21 @@ def build_parser() -> argparse.ArgumentParser:
     reminder_block.add_argument("--delivery-id", required=True)
     reminder_block.add_argument("--claimant", required=True)
     reminder_block.add_argument("--error", required=True)
+    proposal_ack = subparsers.add_parser(
+        "proposal-delivery-ack",
+        help="acknowledge one recovered private proposal summary",
+    )
+    proposal_ack.add_argument("--delivery-id", required=True)
+    proposal_ack.add_argument("--claimant", required=True)
+    proposal_ack.add_argument("--channel-id", required=True)
+    proposal_ack.add_argument("--message-ts", required=True)
+    proposal_block = subparsers.add_parser(
+        "proposal-delivery-block",
+        help="record one definitive recovered proposal delivery failure",
+    )
+    proposal_block.add_argument("--delivery-id", required=True)
+    proposal_block.add_argument("--claimant", required=True)
+    proposal_block.add_argument("--error", required=True)
     return parser
 
 
@@ -5034,6 +5312,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 block_reminder_delivery(
                     args.db,
                     reminder_id=args.reminder_id,
+                    delivery_id=args.delivery_id,
+                    claimant=args.claimant,
+                    error=args.error,
+                )
+            )
+        elif args.command == "proposal-delivery-ack":
+            emit(
+                ack_proposal_delivery(
+                    args.db,
+                    delivery_id=args.delivery_id,
+                    claimant=args.claimant,
+                    channel_id=args.channel_id,
+                    message_ts=args.message_ts,
+                )
+            )
+        elif args.command == "proposal-delivery-block":
+            emit(
+                block_proposal_delivery(
+                    args.db,
                     delivery_id=args.delivery_id,
                     claimant=args.claimant,
                     error=args.error,

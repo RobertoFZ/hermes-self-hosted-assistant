@@ -307,46 +307,7 @@ async def _set_request_reaction(
 
 
 def _format_proposal(context: dict[str, Any]) -> str:
-    conversation = context.get("conversation") or {}
-    token = str(context.get("revision_token") or "")
-    head = str(context.get("head_sha") or "")
-    action = str(context.get("proposed_action") or "comment").upper()
-    lines = [
-        f"*{conversation.get('repo')} #{conversation.get('pr_number')} — {token}*",
-        f"Head: `{head[:12]}`",
-        f"Objective: {context.get('objective') or 'Not provided'}",
-        f"Proposal: {action}",
-        str(context.get("summary") or "Review proposal ready."),
-    ]
-    delta = context.get("delta") or {}
-    if delta and str(delta.get("status")) != "initial":
-        lines.append(
-            "Delta: "
-            + str(delta.get("status")).replace("_", " ")
-            + f" (baseline `{str(context.get('baseline_head_sha') or '')[:12]}`)"
-        )
-    findings = [item for item in context.get("findings", []) if item.get("active", True)]
-    if findings:
-        lines.append("\n*Candidate comments*")
-        for finding in findings:
-            location = str(finding.get("path") or "general")
-            if finding.get("line") is not None:
-                location += f":{finding['line']}"
-            edited = " (edited)" if finding.get("edited") else ""
-            lines.append(
-                f"• `{finding.get('candidate_id')}` {finding.get('severity')} "
-                f"{location}{edited} — {finding.get('body')}"
-            )
-    else:
-        lines.append("No material candidate comments.")
-    commands = [f"`skip {token}`"]
-    if action == "APPROVE":
-        commands.insert(0, f"`approve {token}`")
-    if findings:
-        ids = " ".join(str(item["candidate_id"]) for item in findings)
-        commands.insert(0, f"`publish {token} {ids}`")
-    lines.append("Reply in this thread with questions, or use " + ", ".join(commands) + ".")
-    return "\n".join(lines)
+    return _automation_module().format_private_proposal(context)
 
 
 async def _reconcile_delivery(
