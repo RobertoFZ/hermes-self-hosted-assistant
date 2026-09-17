@@ -32,6 +32,20 @@ class CronConfigTests(unittest.TestCase):
         reminder = next(job for job in config["jobs"] if job["key"] == "pr-review-reminders")
         self.assertEqual(reminder["schedule"], "*/15 * * * *")
         self.assertEqual(reminder["skills"], ["review-reminder"])
+        self.assertIn("NO_REPLY", reminder["prompt"])
+        self.assertEqual(len(config["jobs"]), 2)
+
+    def test_explicit_decision_owner_must_belong_to_owner_set(self):
+        with self.assertRaises(sync_crons.CronConfigError):
+            sync_crons.load_config(
+                ROOT / "config" / "crons.json",
+                {
+                    "TZ": "America/Mexico_City",
+                    "SLACK_REVIEW_OWNER_USER_IDS": "U_OWNER",
+                    "SLACK_REVIEW_DIGEST_USER_ID": "U_OTHER",
+                    "REVIEW_MONOREPO_ROOT": "/workspace",
+                },
+            )
 
     def test_ambiguous_owner_requires_explicit_digest_recipient(self):
         with self.assertRaises(sync_crons.CronConfigError):

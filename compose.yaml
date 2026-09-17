@@ -53,6 +53,10 @@ services:
         target: /opt/global-skills/review-digest
         read_only: true
       - type: bind
+        source: ./skills/review-reminder
+        target: /opt/global-skills/review-reminder
+        read_only: true
+      - type: bind
         source: ./automation
         target: /opt/review-automation
         read_only: true

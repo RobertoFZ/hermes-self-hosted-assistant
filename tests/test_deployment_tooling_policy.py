@@ -24,6 +24,7 @@ APPLY_REVIEW_POLICY = (ROOT / "scripts" / "apply-review-policy.sh").read_text(
 SYNC_SKILLS = (ROOT / "scripts" / "sync-skills.sh").read_text(encoding="utf-8")
 SYNC_CODEX_PLUGINS_PATH = ROOT / "scripts" / "sync-codex-plugins.sh"
 CRON_CONFIG = (ROOT / "config" / "crons.json").read_text(encoding="utf-8")
+REVIEW_ENV_EXAMPLE = (ROOT / ".review.env.example").read_text(encoding="utf-8")
 REVIEW_RESULT_SCHEMA = (
     ROOT / "automation" / "review-result.schema.json"
 ).read_text(encoding="utf-8")
@@ -188,8 +189,60 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertNotIn("target: /opt/global-skills/pr-reviewer", COMPOSE)
         self.assertIn("target: /opt/global-skills/codex-pr-review", COMPOSE)
         self.assertIn("target: /opt/global-skills/review-digest", COMPOSE)
+        self.assertIn("target: /opt/global-skills/review-reminder", COMPOSE)
         self.assertIn("/opt/data/skills/custom/pr-reviewer", SYNC_SKILLS)
         self.assertIn('\\"skill\\": \\"codex-pr-review\\"', APPLY_REVIEW_POLICY)
+
+    def test_private_confirmation_policy_fails_closed_and_stays_quiet(self):
+        self.assertIn("SLACK_REVIEW_DIGEST_USER_ID", APPLY_REVIEW_POLICY)
+        self.assertIn("exactly one decision owner", APPLY_REVIEW_POLICY.lower())
+        self.assertIn("decision owner must be present", APPLY_REVIEW_POLICY.lower())
+        self.assertIn("reaction-only", APPLY_REVIEW_POLICY)
+        self.assertIn("no automatic final response", APPLY_REVIEW_POLICY)
+        self.assertNotIn("send exactly one final response", APPLY_REVIEW_POLICY)
+
+    def test_review_queue_bounds_are_configured_and_validated(self):
+        expected = {
+            "SLACK_REVIEW_MAX_URLS_PER_MESSAGE=5",
+            "SLACK_REVIEW_MAX_ACTIVE_PER_REQUESTER=5",
+            "SLACK_REVIEW_MAX_QUEUED=50",
+            "SLACK_REVIEW_PROPOSAL_CONCURRENCY=3",
+        }
+        for setting in expected:
+            name = setting.split("=", 1)[0]
+            self.assertIn(setting, REVIEW_ENV_EXAMPLE)
+            self.assertIn(name, APPLY_REVIEW_POLICY)
+            self.assertIn(name, VERIFY)
+
+    def test_runtime_verification_checks_private_workflow_contract(self):
+        self.assertIn("review-reminder", VERIFY)
+        self.assertIn("schema_version", VERIFY)
+        self.assertIn("== 3", VERIFY)
+        self.assertIn("review-result.schema.json", VERIFY)
+        self.assertIn("workflow_pr_conversations", VERIFY)
+        self.assertIn("slack-pr-review-gate", VERIFY)
+        self.assertIn("Private PR review reminders", VERIFY)
+        self.assertIn("Daily PR review digest", VERIFY)
+        self.assertIn("materiality-corpus.json", VERIFY)
+
+    def test_readme_documents_private_confirmation_operations(self):
+        required = (
+            "approve Pn",
+            "publish Pn Cn [Cn ...]",
+            "skip Pn",
+            "edit Pn Cn: replacement text",
+            "dismiss Pn Cn [Cn ...]",
+            "one top-level DM",
+            "one compact verdict",
+            "two working hours",
+            "delta unavailable",
+            "branch protection",
+            "operator-blocked",
+            "Manual Slack/GitHub smoke test",
+            "materiality-corpus.json",
+        )
+        for phrase in required:
+            self.assertIn(phrase, README)
 
     def test_matt_pocock_skills_are_vendored_at_the_reviewed_revision(self):
         revision = "3cca18b368ae95cdbdebbff572ccafa662551015"

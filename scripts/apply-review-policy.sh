@@ -18,6 +18,8 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   require_value REVIEW_MONOREPO_ROOT
 
   python -c "import os,sys; values=lambda name: {item.strip() for item in os.environ.get(name, \"\").split(\",\") if item.strip()}; allowed=values(\"SLACK_ALLOWED_USERS\"); required=values(\"SLACK_REVIEW_OWNER_USER_IDS\") | values(\"SLACK_REVIEWER_USER_IDS\") | values(\"SLACK_REVIEW_BOT_USER_IDS\"); sys.exit(0 if required <= allowed else \"Every owner, reviewer, and review bot must also be present in SLACK_ALLOWED_USERS\")"
+  python -c "import os,sys; owners={item.strip() for item in os.environ.get(\"SLACK_REVIEW_OWNER_USER_IDS\", \"\").split(\",\") if item.strip()}; explicit=os.environ.get(\"SLACK_REVIEW_DIGEST_USER_ID\", \"\").strip(); decision=explicit or (next(iter(owners)) if len(owners) == 1 else \"\"); sys.exit(\"Configure exactly one decision owner with SLACK_REVIEW_DIGEST_USER_ID or a single owner fallback\" if not decision else (\"The decision owner must be present in SLACK_REVIEW_OWNER_USER_IDS\" if decision not in owners else 0))"
+  python -c "import os,sys; defaults={\"SLACK_REVIEW_MAX_URLS_PER_MESSAGE\":5,\"SLACK_REVIEW_MAX_ACTIVE_PER_REQUESTER\":5,\"SLACK_REVIEW_MAX_QUEUED\":50,\"SLACK_REVIEW_PROPOSAL_CONCURRENCY\":3}; invalid=[]; [(invalid.append(name)) for name,default in defaults.items() if not os.environ.get(name, str(default)).isdigit() or int(os.environ.get(name, str(default))) < 1]; sys.exit(0 if not invalid else \"Review queue settings must be positive integers: \" + \", \".join(invalid))"
 
   case "$SLACK_REVIEW_CHANNEL_ID" in
     C[A-Z0-9]*|G[A-Z0-9]*) ;;
@@ -26,7 +28,7 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
 
   python -c "import os; from hermes_cli.config import save_env_value; save_env_value(\"SLACK_ALLOWED_USERS\", os.environ[\"SLACK_ALLOWED_USERS\"])"
 
-  channel_prompts="$(python -c "import json,os; print(json.dumps({os.environ[\"SLACK_REVIEW_CHANNEL_ID\"]: \"Delegate only exact pull request URLs from the current triggering message through codex-pr-review. Never inherit URLs from thread context or discover additional PRs. After the command finishes, send exactly one final response containing only GitHub-verified results.\"}))")"
+  channel_prompts="$(python -c "import json,os; print(json.dumps({os.environ[\"SLACK_REVIEW_CHANNEL_ID\"]: \"Delegate only exact pull request URLs from the current triggering message through codex-pr-review. Never inherit URLs from thread context or discover additional PRs. Accepted requests use a reaction-only pending state and return NO_REPLY: there is no automatic final response. The workflow privately asks the decision owner and the gate creates or edits one compact terminal verdict in the original request thread.\"}))")"
   channel_bindings="$(python -c "import json,os; print(json.dumps([{\"id\": os.environ[\"SLACK_REVIEW_CHANNEL_ID\"], \"skill\": \"codex-pr-review\"}]))")"
   owner_ids="$(python -c "import json,os; print(json.dumps([value.strip() for value in os.environ[\"SLACK_REVIEW_OWNER_USER_IDS\"].split(\",\") if value.strip()]))")"
 

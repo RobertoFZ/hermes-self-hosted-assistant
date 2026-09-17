@@ -28,13 +28,23 @@ def deployment_env(source: Mapping[str, str] | None = None) -> dict[str, str]:
     env = dict(source or os.environ)
     if not env.get("TZ", "").strip():
         env["TZ"] = "America/Mexico_City"
-    if not env.get("SLACK_REVIEW_DIGEST_USER_ID", "").strip():
-        owners = [item.strip() for item in env.get("SLACK_REVIEW_OWNER_USER_IDS", "").split(",") if item.strip()]
+    owners = {
+        item.strip()
+        for item in env.get("SLACK_REVIEW_OWNER_USER_IDS", "").split(",")
+        if item.strip()
+    }
+    decision_owner = env.get("SLACK_REVIEW_DIGEST_USER_ID", "").strip()
+    if not decision_owner:
         if len(owners) != 1:
             raise CronConfigError(
                 "set SLACK_REVIEW_DIGEST_USER_ID or configure exactly one SLACK_REVIEW_OWNER_USER_IDS value"
             )
-        env["SLACK_REVIEW_DIGEST_USER_ID"] = owners[0]
+        decision_owner = next(iter(owners))
+    if decision_owner not in owners:
+        raise CronConfigError(
+            "SLACK_REVIEW_DIGEST_USER_ID must also be present in SLACK_REVIEW_OWNER_USER_IDS"
+        )
+    env["SLACK_REVIEW_DIGEST_USER_ID"] = decision_owner
     return env
 
 
