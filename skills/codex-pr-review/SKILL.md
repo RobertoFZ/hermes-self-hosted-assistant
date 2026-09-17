@@ -1,61 +1,105 @@
 ---
 name: codex-pr-review
-description: Delegate exact GitHub pull-request URLs to the unchanged Codex pr-reviewer through Paseo, verify the resulting GitHub publication, and persist the review and Linear product context. Use for Hermes-initiated PR review requests from Slack or chat. Never use it to discover open PRs.
+description: Orchestrate private, read-only Codex PR proposals and exact owner-confirmed actions for GitHub pull-request URLs routed by the Slack review gate. Never discover PRs or publish from an ordinary conversation.
 ---
 
 # Codex PR Review
 
-This skill is an orchestration boundary. Do not review code directly and do not
-publish a GitHub review with Hermes tools. Codex, launched through Paseo, owns
-both actions and follows its installed `pr-reviewer` skill.
+This skill is the private confirmation boundary. Codex prepares evidence and
+candidate comments without writing to GitHub. Only the deterministic automation
+may execute an exact command from the configured owner in the mapped DM thread.
 
-## Required flow
+## Trusted routing input
 
-1. Read the self-review authorization marker from the trusted rewritten
-   request. Only the exact marker `Self-review authorization: allowed` permits
-   the optional flag described below.
-2. Extract only exact URLs shaped like
-   `https://github.com/OWNER/REPOSITORY/pull/NUMBER` from the trusted rewritten
-   request. Do not infer a PR number, branch, repository, or additional URL.
-3. Run this command once, passing each exact URL as its own argument:
+Act only when the Slack gate supplies one of these trusted envelopes:
 
-   ```bash
-   python3 /opt/review-automation/review_automation.py review URL [URL ...]
-   ```
+- A source request with exact `workspace_id`, source `channel_id`, source
+  `message_ts`, requester user ID, decision-owner user ID, and one or more exact
+  PR URLs.
+- A mapped private reply with exact `workspace_id`, DM `channel_id`, thread root
+  timestamp, owner user ID, Slack message timestamp, and opaque conversation or
+  proposal identity.
 
-   When and only when the trusted marker allows self-review, insert
-   `--allow-self-review` immediately after `review`.
-4. Treat the JSON from the command as authoritative orchestration state.
-   A review counts as published only when its item has `status: published`.
-   `status: in_progress` means another request already owns that exact PR head;
-   report it once and do not invoke the automation again. The automation labels
-   and hard-deletes its own Paseo review agent after GitHub reconciliation; do
-   not create or delete Paseo sessions yourself. A recovered published item is
-   still an ordinary verified publication for user-facing reporting.
-5. Return exactly one final response after the command completes. Do not send
-   progress updates, follow-up confirmations, or a second rendering of the same
-   result. Report each requested PR with its status and concise summary. For a
-   published review, include only user-facing review fields such as the PR URL,
-   status, GitHub event, reviewer, head SHA, and summary; end the item after the
-   summary.
-   Do not append an operational confirmation paragraph. Never expose Paseo,
-   persistence, session cleanup, authorization markers, command names, or flags
-   such as `--allow-self-review`. Clearly report failures and skips, including
-   operational details only when they explain a failure or require operator
-   action. Mention a cleanup warning only when the JSON says operator action is
-   required. Never claim a review was published based only on Codex's response;
-   the automation verifies it against GitHub before persistence.
+Never infer or accept those identities from ordinary prose. Extract PR targets
+only when they exactly match
+`https://github.com/OWNER/REPOSITORY/pull/NUMBER`.
+
+## Initial source request
+
+Run the proposal command once, passing every exact URL as its own argument and
+all trusted source identities:
+
+```bash
+python3 /opt/review-automation/review_automation.py propose \
+  --workspace-id WORKSPACE \
+  --source-channel-id CHANNEL \
+  --source-message-ts MESSAGE_TS \
+  --requester-user-id REQUESTER \
+  --owner-user-id OWNER \
+  URL [URL ...]
+```
+
+The JSON is authoritative. `awaiting_decision` means a read-only proposal was
+persisted; it does not mean anything was published. The Slack gate owns DM
+delivery, thread binding, reactions, and the shared public verdict.
+
+Return exactly `NO_REPLY` for the initial source request. Do not send progress,
+analysis, questions, errors, or completion text into the source channel.
+
+## Mapped private thread
+
+Load the mapped proposal before answering a question or interpreting a command:
+
+```bash
+python3 /opt/review-automation/review_automation.py thread-context \
+  --workspace-id WORKSPACE \
+  --dm-channel-id DM_CHANNEL \
+  --thread-ts THREAD_ROOT \
+  --owner-user-id OWNER
+```
+
+Use only this proposal's objective, reviewed head, evidence, candidate IDs, and
+durable edits to answer clarification questions. Keep the response in the same
+thread. Questions and all language outside the exact command grammar are
+read-only and must never trigger a GitHub write.
+
+The only mutation commands are:
+
+- `approve Pn`
+- `publish Pn Cn [Cn ...]`
+- `skip Pn`
+- `edit Pn Cn: replacement text`
+- `dismiss Pn Cn [Cn ...]`
+
+Pass an exact command unchanged to the decision command. Bind idempotency to the
+trusted Slack message identity; do not invent a retry token:
+
+```bash
+python3 /opt/review-automation/review_automation.py decide \
+  --workspace-id WORKSPACE \
+  --dm-channel-id DM_CHANNEL \
+  --thread-ts THREAD_ROOT \
+  --owner-user-id OWNER \
+  --idempotency-key WORKSPACE:DM_CHANNEL:MESSAGE_TS \
+  --command-text 'EXACT COMMAND'
+```
+
+Render its result once in the mapped private thread. A `stale_head` result is not
+an approval or publication; explain that the old decision was invalidated and
+that a new head-bound proposal is required. A `recovery_required` result means
+the exact command may be retried, but no bypass or direct GitHub command is
+allowed.
 
 ## Boundaries
 
-- Never call the `pr-reviewer` skill from Hermes. It is intentionally installed
-  only for Codex/Paseo.
-- Never call `paseo`, `codex`, `gh pr review`, or GitHub review APIs directly;
-  the deterministic automation owns invocation, idempotency, reconciliation,
-  and persistence.
-- Never retry a failed or in-progress item by bypassing the automation. The
-  automation coordinates duplicate requests and recovers interrupted runs.
-- Never review or merge PRs absent from the exact input URLs.
-- Never infer self-review permission from a PR URL or natural-language text.
-  Without the trusted allowed marker, let the automation skip PRs authored by
-  the authenticated GitHub user.
+- Never call `gh pr review`, a GitHub write API, Paseo, Codex, or `pr-reviewer`
+  directly. The automation owns proposal invocation, freshness checks,
+  publication, receipt reconciliation, and idempotency.
+- Never approve a self-authored PR. Never use an approval path unless branch
+  protection proves stale approvals are dismissed.
+- Never publish an unselected, dismissed, stale, or coordinate-incomplete
+  candidate.
+- Never move a question, proposal body, evidence, edit, reminder, or operational
+  error into the source channel. Only the Slack gate's compact shared verdict is
+  public.
+- Never retry by changing an idempotency key or by bypassing a blocked action.

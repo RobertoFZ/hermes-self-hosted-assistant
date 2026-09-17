@@ -14,6 +14,376 @@ from automation import review_automation as automation
 
 
 class ReviewAutomationTests(unittest.TestCase):
+    def _ready_proposal(
+        self,
+        db,
+        *,
+        owner_user_id="U_OWNER",
+        dm_channel_id="D1",
+        thread_ts="1720000000.000100",
+        head_sha="a" * 40,
+    ):
+        conversation_id, _ = automation.get_or_create_pr_conversation(
+            db,
+            workspace_id="T1",
+            owner_user_id=owner_user_id,
+            repo="acme/api",
+            pr_number=42,
+            pr_url="https://github.com/acme/api/pull/42",
+        )
+        automation.bind_pr_conversation_thread(
+            db,
+            conversation_id,
+            dm_channel_id=dm_channel_id,
+            thread_ts=thread_ts,
+        )
+        proposal = automation.create_proposal_revision(
+            db, conversation_id, head_sha=head_sha
+        )
+        _, attempt_id = automation.claim_analysis_attempt(
+            db, proposal["id"], claimant="test"
+        )
+        result = {
+            "repo": "acme/api",
+            "pr_number": 42,
+            "head_sha": head_sha,
+            "baseline_head_sha": None,
+            "event": "COMMENT",
+            "published": False,
+            "objective": "Protect persisted prices",
+            "summary": "Two material issues",
+            "findings": [
+                {
+                    "candidate_id": "C1",
+                    "category": "correctness",
+                    "severity": "major",
+                    "path": "price.py",
+                    "line": 42,
+                    "start_line": None,
+                    "side": "RIGHT",
+                    "start_side": None,
+                    "body": "Original first comment",
+                    "evidence": "The persisted price is overwritten.",
+                    "blocking": True,
+                },
+                {
+                    "candidate_id": "C2",
+                    "category": "error_handling",
+                    "severity": "major",
+                    "path": "worker.py",
+                    "line": 17,
+                    "start_line": None,
+                    "side": "RIGHT",
+                    "start_side": None,
+                    "body": "Original second comment",
+                    "evidence": "Failures are returned as successes.",
+                    "blocking": True,
+                },
+            ],
+            "delta": {
+                "status": "initial",
+                "summary": None,
+                "addressed_candidate_ids": [],
+                "still_open_candidate_ids": [],
+                "new_candidate_ids": ["C1", "C2"],
+            },
+            "linear": {
+                "fetch_status": "missing",
+                "key": None,
+                "title": None,
+                "url": None,
+                "status": None,
+                "project": None,
+                "product_summary": None,
+                "acceptance_criteria": [],
+                "labels": [],
+            },
+            "limitations": [],
+        }
+        automation.record_analysis_output(
+            db, attempt_id=attempt_id, output=result
+        )
+        automation.persist_proposal_result(
+            db,
+            proposal_id=proposal["id"],
+            attempt_id=attempt_id,
+            reviewed_head=head_sha,
+            objective=result["objective"],
+            proposed_action="publish",
+            summary=result["summary"],
+            structured_result=result,
+            findings=result["findings"],
+        )
+        return conversation_id, proposal, result
+
+    def test_revision_bound_command_parser_accepts_only_exact_mutations(self):
+        approve = automation.parse_decision_command("approve P3")
+        publish = automation.parse_decision_command("publish P3 C1 C3")
+        edit = automation.parse_decision_command("edit P3 C1: Better wording")
+        dismiss = automation.parse_decision_command("dismiss P3 C2")
+
+        self.assertEqual((approve.action, approve.revision_token), ("approve", "P3"))
+        self.assertEqual(publish.candidate_ids, ("C1", "C3"))
+        self.assertEqual((edit.candidate_ids, edit.body), (("C1",), "Better wording"))
+        self.assertEqual(dismiss.candidate_ids, ("C2",))
+        for text in (
+            "approve",
+            "please approve P3",
+            "publish P3",
+            "publish P3 C1, C3",
+            "edit P3 C1 Better wording",
+            "dismiss P3",
+            "approve P03",
+        ):
+            self.assertIsNone(automation.parse_decision_command(text), text)
+
+    def test_propose_persists_read_only_result_without_github_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/42",
+                repo="acme/api",
+                number=42,
+                title="Fix persisted prices",
+                body="",
+                head_sha="a" * 40,
+                base_ref="main",
+                author_login="developer",
+            )
+            result = {
+                "repo": pr.repo,
+                "pr_number": pr.number,
+                "head_sha": pr.head_sha,
+                "baseline_head_sha": None,
+                "event": "APPROVE",
+                "published": False,
+                "objective": "Keep price writes safe",
+                "summary": "No material findings.",
+                "findings": [],
+                "delta": {
+                    "status": "initial",
+                    "summary": None,
+                    "addressed_candidate_ids": [],
+                    "still_open_candidate_ids": [],
+                    "new_candidate_ids": [],
+                },
+                "linear": {"fetch_status": "missing"},
+                "limitations": [],
+            }
+            with patch.object(automation, "load_pr", return_value=pr), patch.object(
+                automation, "reviewer_login", return_value="review-bot"
+            ), patch.object(
+                automation, "invoke_codex", return_value=result
+            ), patch.object(
+                automation, "github_json_request"
+            ) as github_write, patch.object(
+                automation, "cleanup_paseo_review_agent", return_value=[]
+            ):
+                proposed = automation.propose_urls(
+                    [pr.url],
+                    db_path=str(database),
+                    workspace_id="T1",
+                    source_channel_id="C1",
+                    source_message_ts="1720000000.000100",
+                    requester_user_id="U_REQUESTER",
+                    owner_user_id="U_OWNER",
+                )
+
+            self.assertEqual(proposed["results"][0]["status"], "awaiting_decision")
+            self.assertEqual(proposed["results"][0]["revision_token"], "P1")
+            github_write.assert_not_called()
+            with automation.connect_db(database) as db:
+                row = db.execute(
+                    "SELECT state, structured_result FROM proposal_revisions"
+                ).fetchone()
+            self.assertEqual(row["state"], "awaiting_decision")
+            self.assertFalse(json.loads(row["structured_result"])["published"])
+
+    def test_thread_command_guards_owner_thread_revision_and_head(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                self._ready_proposal(db)
+                row_count = db.execute(
+                    "SELECT COUNT(*) FROM proposal_decisions"
+                ).fetchone()[0]
+                read_only = automation.execute_thread_command(
+                    db,
+                    workspace_id="T1",
+                    dm_channel_id="D1",
+                    thread_ts="1720000000.000100",
+                    owner_user_id="U_OWNER",
+                    command_text="can you explain C1?",
+                    idempotency_key="msg-question",
+                )
+                with self.assertRaisesRegex(automation.AutomationError, "owner"):
+                    automation.execute_thread_command(
+                        db,
+                        workspace_id="T1",
+                        dm_channel_id="D1",
+                        thread_ts="1720000000.000100",
+                        owner_user_id="U_OTHER",
+                        command_text="skip P1",
+                        idempotency_key="msg-wrong-owner",
+                    )
+                with self.assertRaisesRegex(automation.AutomationError, "thread"):
+                    automation.execute_thread_command(
+                        db,
+                        workspace_id="T1",
+                        dm_channel_id="D1",
+                        thread_ts="wrong",
+                        owner_user_id="U_OWNER",
+                        command_text="skip P1",
+                        idempotency_key="msg-wrong-thread",
+                    )
+                with self.assertRaisesRegex(automation.AutomationError, "revision"):
+                    automation.execute_thread_command(
+                        db,
+                        workspace_id="T1",
+                        dm_channel_id="D1",
+                        thread_ts="1720000000.000100",
+                        owner_user_id="U_OWNER",
+                        command_text="skip P2",
+                        idempotency_key="msg-wrong-revision",
+                    )
+                after_count = db.execute(
+                    "SELECT COUNT(*) FROM proposal_decisions"
+                ).fetchone()[0]
+
+            self.assertEqual(read_only["status"], "read_only")
+            self.assertEqual(after_count, row_count)
+
+    def test_publish_uses_only_selected_edited_active_candidate_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            current_pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/42",
+                repo="acme/api",
+                number=42,
+                title="Fix persisted prices",
+                body="",
+                head_sha="a" * 40,
+                base_ref="main",
+                author_login="developer",
+            )
+            with automation.connect_db(database) as db:
+                self._ready_proposal(db)
+                automation.execute_thread_command(
+                    db,
+                    workspace_id="T1",
+                    dm_channel_id="D1",
+                    thread_ts="1720000000.000100",
+                    owner_user_id="U_OWNER",
+                    command_text="edit P1 C1: Edited first comment",
+                    idempotency_key="msg-edit",
+                )
+                automation.execute_thread_command(
+                    db,
+                    workspace_id="T1",
+                    dm_channel_id="D1",
+                    thread_ts="1720000000.000100",
+                    owner_user_id="U_OWNER",
+                    command_text="dismiss P1 C2",
+                    idempotency_key="msg-dismiss",
+                )
+                marker_comment = {
+                    "id": 301,
+                    "user": {"login": "review-bot"},
+                    "commit_id": current_pr.head_sha,
+                    "original_commit_id": current_pr.head_sha,
+                    "body": "Edited first comment\n\n<!-- hermes-review-action:ACTION:C1 -->",
+                    "html_url": "https://github.com/acme/api/pull/42#discussion_r301",
+                }
+                with patch.object(
+                    automation, "load_pr", return_value=current_pr
+                ), patch.object(
+                    automation, "reviewer_login", return_value="review-bot"
+                ), patch.object(
+                    automation, "github_publications",
+                    side_effect=[
+                        {"reviews": [], "comments": []},
+                        {"reviews": [], "comments": [marker_comment]},
+                    ],
+                ), patch.object(
+                    automation, "github_json_request", return_value={"id": 201}
+                ) as github_write, patch.object(
+                    automation, "action_marker",
+                    side_effect=lambda action_id, candidate_id=None: (
+                        "<!-- hermes-review-action:ACTION"
+                        + (f":{candidate_id}" if candidate_id else "")
+                        + " -->"
+                    ),
+                ):
+                    published = automation.execute_thread_command(
+                        db,
+                        workspace_id="T1",
+                        dm_channel_id="D1",
+                        thread_ts="1720000000.000100",
+                        owner_user_id="U_OWNER",
+                        command_text="publish P1 C1",
+                        idempotency_key="msg-publish",
+                    )
+                    replayed = automation.execute_thread_command(
+                        db,
+                        workspace_id="T1",
+                        dm_channel_id="D1",
+                        thread_ts="1720000000.000100",
+                        owner_user_id="U_OWNER",
+                        command_text="publish P1 C1",
+                        idempotency_key="msg-publish",
+                    )
+
+            payload = github_write.call_args.args[2]
+            self.assertEqual(payload["event"], "COMMENT")
+            self.assertEqual(len(payload["comments"]), 1)
+            self.assertIn("Edited first comment", payload["comments"][0]["body"])
+            self.assertEqual(published["status"], "completed")
+            self.assertEqual(replayed["status"], "completed")
+            github_write.assert_called_once()
+
+    def test_stale_head_and_unsafe_or_self_approval_never_write(self):
+        cases = (
+            ("b" * 40, "developer", True, "stale_head"),
+            ("a" * 40, "developer", False, "stale approvals"),
+            ("a" * 40, "review-bot", True, "self-authored"),
+        )
+        for current_head, author, safe, expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as directory:
+                database = Path(directory) / "reviews.sqlite3"
+                with automation.connect_db(database) as db:
+                    self._ready_proposal(db)
+                    current_pr = automation.PullRequest(
+                        url="https://github.com/acme/api/pull/42",
+                        repo="acme/api",
+                        number=42,
+                        title="Fix persisted prices",
+                        body="",
+                        head_sha=current_head,
+                        base_ref="main",
+                        author_login=author,
+                    )
+                    with patch.object(
+                        automation, "load_pr", return_value=current_pr
+                    ), patch.object(
+                        automation, "reviewer_login", return_value="review-bot"
+                    ), patch.object(
+                        automation, "approval_dismisses_stale_reviews", return_value=safe
+                    ), patch.object(
+                        automation, "github_json_request"
+                    ) as github_write:
+                        result = automation.execute_thread_command(
+                            db,
+                            workspace_id="T1",
+                            dm_channel_id="D1",
+                            thread_ts="1720000000.000100",
+                            owner_user_id="U_OWNER",
+                            command_text="approve P1",
+                            idempotency_key=f"msg-{expected}",
+                        )
+
+                self.assertIn(expected, result.get("reason", result["status"]))
+                github_write.assert_not_called()
+
     def test_existing_database_migrates_cleanup_state(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "reviews.sqlite3"

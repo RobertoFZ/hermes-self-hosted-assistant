@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Delegate PR reviews to Codex through Paseo and persist verified outcomes."""
+"""Prepare private PR proposals and execute explicitly confirmed review actions."""
 
 from __future__ import annotations
 
@@ -26,6 +26,19 @@ PR_URL_RE = re.compile(
 DEFAULT_DB = "/opt/data/review-history/reviews.sqlite3"
 DEFAULT_SCHEMA = "/opt/review-automation/review-result.schema.json"
 PASEO_REVIEW_LABEL = "hermes-review-run"
+REVISION_TOKEN_PATTERN = r"P[1-9][0-9]*"
+CANDIDATE_TOKEN_PATTERN = r"C[1-9][0-9]*"
+TERMINAL_COMMAND_RE = re.compile(
+    rf"^(?P<action>approve|skip) (?P<revision>{REVISION_TOKEN_PATTERN})$"
+)
+SELECTION_COMMAND_RE = re.compile(
+    rf"^(?P<action>publish|dismiss) (?P<revision>{REVISION_TOKEN_PATTERN}) "
+    rf"(?P<candidates>{CANDIDATE_TOKEN_PATTERN}(?: {CANDIDATE_TOKEN_PATTERN})*)$"
+)
+EDIT_COMMAND_RE = re.compile(
+    rf"^edit (?P<revision>{REVISION_TOKEN_PATTERN}) "
+    rf"(?P<candidate>{CANDIDATE_TOKEN_PATTERN}): (?P<body>\S(?:.*\S)?)$"
+)
 
 
 class AutomationError(RuntimeError):
@@ -42,6 +55,38 @@ class PullRequest:
     head_sha: str
     base_ref: str
     author_login: str
+    state: str = "OPEN"
+
+
+@dataclass(frozen=True)
+class DecisionCommand:
+    action: str
+    revision_token: str
+    candidate_ids: tuple[str, ...] = ()
+    body: str | None = None
+
+
+def parse_decision_command(text: str) -> DecisionCommand | None:
+    """Parse only the documented revision-bound mutation language."""
+    value = text.strip()
+    match = TERMINAL_COMMAND_RE.fullmatch(value)
+    if match:
+        return DecisionCommand(match["action"], match["revision"])
+    match = SELECTION_COMMAND_RE.fullmatch(value)
+    if match:
+        candidates = tuple(match["candidates"].split(" "))
+        if len(set(candidates)) != len(candidates):
+            return None
+        return DecisionCommand(match["action"], match["revision"], candidates)
+    match = EDIT_COMMAND_RE.fullmatch(value)
+    if match:
+        return DecisionCommand(
+            "edit",
+            match["revision"],
+            (match["candidate"],),
+            match["body"],
+        )
+    return None
 
 
 def utc_now() -> datetime:
@@ -62,6 +107,7 @@ def run(
     timeout: int | None = None,
     check: bool = True,
     env: Mapping[str, str] | None = None,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         list(command),
@@ -70,6 +116,7 @@ def run(
         text=True,
         timeout=timeout,
         env=env,
+        input=input_text,
     )
     if check and completed.returncode:
         detail = completed.stderr.strip() or completed.stdout.strip()
@@ -100,6 +147,18 @@ def gh_json(args: Sequence[str]) -> Any:
         raise AutomationError("GitHub CLI returned invalid JSON") from exc
 
 
+def github_json_request(method: str, endpoint: str, payload: Mapping[str, Any]) -> Any:
+    """Send one JSON GitHub API request without shell interpolation."""
+    result = run(
+        ["gh", "api", "--method", method, endpoint, "--input", "-"],
+        input_text=json.dumps(dict(payload), sort_keys=True),
+    )
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AutomationError("GitHub API returned invalid JSON") from exc
+
+
 def gh_paginated(endpoint: str) -> list[dict[str, Any]]:
     pages = gh_json(["api", "--paginate", "--slurp", endpoint])
     if not isinstance(pages, list):
@@ -117,7 +176,7 @@ def load_pr(url: str) -> PullRequest:
             "view",
             url,
             "--json",
-            "url,number,title,body,headRefOid,baseRefName,author",
+            "url,number,title,body,headRefOid,baseRefName,author,state",
         ]
     )
     if int(data["number"]) != expected_number:
@@ -132,6 +191,7 @@ def load_pr(url: str) -> PullRequest:
         head_sha=str(data["headRefOid"]),
         base_ref=str(data.get("baseRefName") or ""),
         author_login=str(author.get("login") or ""),
+        state=str(data.get("state") or "OPEN").upper(),
     )
 
 
@@ -2238,12 +2298,13 @@ def invoke_codex(pr: PullRequest, *, run_id: str) -> dict[str, Any]:
     timeout_value = os.environ.get("REVIEW_PASEO_TIMEOUT", "45m")
     schema = os.environ.get("REVIEW_RESULT_SCHEMA", DEFAULT_SCHEMA)
     prompt = (
-        "$pr-reviewer Review and publish the GitHub review for exactly this pull request: "
+        "$pr-reviewer Analyze exactly this pull request and return a read-only proposal: "
         f"{pr.url}\n"
-        "Do not discover or review any other pull request. Preserve every decision and "
-        "publication rule in the pr-reviewer skill. Include the related Linear issue context "
-        "when it can be derived and fetched. After publishing, return only the structured "
-        "result required by the supplied output schema."
+        "Do not discover or review any other pull request. Do not submit a review, approve, "
+        "comment, merge, close, or call any GitHub write endpoint. Bind the proposal to head "
+        f"{pr.head_sha}. Include related Linear context when it can be derived and fetched. "
+        "Return only the structured result required by the supplied output schema with "
+        "published set to false."
     )
     command = [
         "paseo",
@@ -2288,6 +2349,18 @@ def validate_result(result: Mapping[str, Any], pr: PullRequest) -> None:
         raise AutomationError("Codex result PR number does not match the requested PR")
     if str(result.get("head_sha", "")) != pr.head_sha:
         raise AutomationError("Codex result head SHA does not match GitHub")
+
+
+def validate_proposal_result(result: Mapping[str, Any], pr: PullRequest) -> None:
+    validate_result(result, pr)
+    if result.get("published") is not False:
+        raise AutomationError("Codex result must be a read-only unpublished proposal")
+    if str(result.get("event") or "") not in {"APPROVE", "COMMENT"}:
+        raise AutomationError("Codex proposal event is invalid")
+    if not str(result.get("objective") or "").strip():
+        raise AutomationError("Codex proposal objective is required")
+    if not isinstance(result.get("findings"), list):
+        raise AutomationError("Codex proposal findings must be a list")
 
 
 def persist_verified(
@@ -2703,6 +2776,726 @@ def review_urls(
     }
 
 
+def proposal_context(
+    db: sqlite3.Connection,
+    *,
+    conversation_id: str,
+    revision_token: str | None = None,
+) -> dict[str, Any]:
+    """Render persisted proposal state, including durable edits and dismissals."""
+    if revision_token is None:
+        proposal = active_proposal(db, conversation_id)
+        if proposal is None:
+            raise AutomationError("PR conversation has no active proposal")
+    else:
+        row = db.execute(
+            "SELECT * FROM proposal_revisions WHERE conversation_id = ? "
+            "AND revision_token = ?",
+            (conversation_id, revision_token),
+        ).fetchone()
+        if row is None:
+            raise AutomationError("unknown proposal revision")
+        proposal = _row_dict(row)
+
+    findings = [
+        _row_dict(row)
+        for row in db.execute(
+            "SELECT * FROM proposal_findings WHERE proposal_id = ? ORDER BY id",
+            (proposal["id"],),
+        ).fetchall()
+    ]
+    finding_by_id = {str(item["candidate_id"]): item for item in findings}
+    for item in finding_by_id.values():
+        item["active"] = True
+        item["edited"] = False
+    decisions = db.execute(
+        "SELECT action, selected_candidate_ids, payload FROM proposal_decisions "
+        "WHERE proposal_id = ? AND action IN ('edit', 'dismiss') "
+        "AND state IN ('accepted', 'completed') ORDER BY created_at, id",
+        (proposal["id"],),
+    ).fetchall()
+    for decision in decisions:
+        selected = json.loads(str(decision["selected_candidate_ids"] or "[]"))
+        payload = json.loads(str(decision["payload"] or "{}"))
+        if str(decision["action"]) == "dismiss":
+            for candidate_id in selected:
+                if candidate_id in finding_by_id:
+                    finding_by_id[candidate_id]["active"] = False
+        elif selected and selected[0] in finding_by_id:
+            finding_by_id[selected[0]]["body"] = str(payload.get("body") or "")
+            finding_by_id[selected[0]]["edited"] = True
+    result = dict(proposal)
+    result["findings"] = list(finding_by_id.values())
+    return result
+
+
+def thread_context(
+    db: sqlite3.Connection,
+    *,
+    workspace_id: str,
+    dm_channel_id: str,
+    thread_ts: str,
+    owner_user_id: str | None = None,
+) -> dict[str, Any]:
+    conversation = conversation_for_slack_thread(
+        db,
+        workspace_id=workspace_id,
+        dm_channel_id=dm_channel_id,
+        thread_ts=thread_ts,
+    )
+    if conversation is None:
+        raise AutomationError("Slack thread is not mapped to a PR conversation")
+    if owner_user_id is not None and str(conversation["owner_user_id"]) != owner_user_id:
+        raise AutomationError("decision owner does not match the PR conversation")
+    if conversation.get("proposal_id") is None:
+        latest = db.execute(
+            "SELECT id, revision_token, head_sha, state FROM proposal_revisions "
+            "WHERE conversation_id = ? ORDER BY revision_number DESC LIMIT 1",
+            (conversation["id"],),
+        ).fetchone()
+        if latest is None:
+            raise AutomationError("PR conversation has no proposal")
+        conversation["proposal_id"] = latest["id"]
+        conversation["revision_token"] = latest["revision_token"]
+        conversation["proposal_head"] = latest["head_sha"]
+        conversation["proposal_state"] = latest["state"]
+    context = proposal_context(
+        db,
+        conversation_id=str(conversation["id"]),
+        revision_token=str(conversation["revision_token"]),
+    )
+    context["conversation"] = conversation
+    return context
+
+
+def propose_one(
+    db: sqlite3.Connection,
+    url: str,
+    login: str,
+    *,
+    request_id: str,
+    workspace_id: str,
+    owner_user_id: str,
+    position: int,
+    claimant: str = "proposal-cli",
+) -> dict[str, Any]:
+    """Generate and persist one read-only, head-bound proposal."""
+    pr = load_pr(url)
+    if pr.state != "OPEN":
+        return {"url": pr.url, "status": f"pr_{pr.state.lower()}", "head_sha": pr.head_sha}
+    conversation_id, _ = get_or_create_pr_conversation(
+        db,
+        workspace_id=workspace_id,
+        owner_user_id=owner_user_id,
+        repo=pr.repo,
+        pr_number=pr.number,
+        pr_url=pr.url,
+    )
+    associate_request_conversation(db, request_id, conversation_id, position=position)
+    current = active_proposal(db, conversation_id)
+    if current is not None and str(current["head_sha"]) == pr.head_sha:
+        return {
+            "url": pr.url,
+            "status": str(current["state"]),
+            "conversation_id": conversation_id,
+            "proposal_id": str(current["id"]),
+            "revision_token": str(current["revision_token"]),
+            "head_sha": pr.head_sha,
+            "reused": True,
+        }
+    baseline = str(current["head_sha"]) if current is not None else None
+    proposal = create_proposal_revision(
+        db,
+        conversation_id,
+        head_sha=pr.head_sha,
+        baseline_head_sha=baseline,
+    )
+    claim_state, attempt_id = claim_analysis_attempt(
+        db, proposal["id"], claimant=claimant
+    )
+    if claim_state != "claimed":
+        return {
+            "url": pr.url,
+            "status": "in_progress",
+            "conversation_id": conversation_id,
+            "proposal_id": proposal["id"],
+            "revision_token": proposal["revision_token"],
+            "head_sha": pr.head_sha,
+        }
+    cleanup_warnings: list[str] = []
+    try:
+        result = invoke_codex(pr, run_id=proposal["id"])
+        validate_proposal_result(result, pr)
+        if pr.author_login.lower() == login.lower() and result.get("event") == "APPROVE":
+            result = dict(result)
+            result["event"] = "COMMENT"
+            result["summary"] = (
+                str(result.get("summary") or "")
+                + " Self-authored pull requests cannot be approved by this reviewer."
+            ).strip()
+        record_analysis_output(db, attempt_id=attempt_id, output=result)
+        delta = result.get("delta") or {}
+        persist_proposal_result(
+            db,
+            proposal_id=proposal["id"],
+            attempt_id=attempt_id,
+            reviewed_head=pr.head_sha,
+            objective=str(result["objective"]),
+            proposed_action=str(result["event"]).lower(),
+            summary=str(result["summary"]),
+            structured_result=result,
+            findings=list(result.get("findings") or []),
+            delta_available=(
+                str(delta.get("status")) == "available"
+                if str(delta.get("status")) != "initial"
+                else None
+            ),
+        )
+        response = {
+            "url": pr.url,
+            "status": "awaiting_decision",
+            "conversation_id": conversation_id,
+            "proposal_id": proposal["id"],
+            "revision_token": proposal["revision_token"],
+            "head_sha": pr.head_sha,
+            "objective": result["objective"],
+            "event": result["event"],
+            "summary": result["summary"],
+            "finding_count": len(result.get("findings") or []),
+        }
+        return response
+    finally:
+        cleanup_warnings.extend(cleanup_paseo_review_agent(proposal["id"]))
+        if cleanup_warnings:
+            print("; ".join(cleanup_warnings), file=sys.stderr)
+
+
+def propose_urls(
+    urls: Iterable[str],
+    *,
+    workspace_id: str,
+    source_channel_id: str,
+    source_message_ts: str,
+    requester_user_id: str,
+    owner_user_id: str,
+    db_path: str | None = None,
+) -> dict[str, Any]:
+    unique_urls = list(dict.fromkeys(url.strip() for url in urls if url.strip()))
+    if not unique_urls:
+        raise AutomationError("at least one exact GitHub pull request URL is required")
+    for url in unique_urls:
+        parse_pr_url(url)
+    login = reviewer_login()
+    with connect_db(db_path) as db:
+        request_id, _ = get_or_create_source_request(
+            db,
+            workspace_id=workspace_id,
+            channel_id=source_channel_id,
+            message_ts=source_message_ts,
+            requester_user_id=requester_user_id,
+        )
+        results = [
+            propose_one(
+                db,
+                url,
+                login,
+                request_id=request_id,
+                workspace_id=workspace_id,
+                owner_user_id=owner_user_id,
+                position=position,
+            )
+            for position, url in enumerate(unique_urls)
+        ]
+    return {
+        "reviewer": login,
+        "request_id": request_id,
+        "requested": len(unique_urls),
+        "awaiting_decision": sum(
+            item["status"] == "awaiting_decision" for item in results
+        ),
+        "results": results,
+    }
+
+
+def action_marker(action_id: str, candidate_id: str | None = None) -> str:
+    suffix = f":{candidate_id}" if candidate_id is not None else ""
+    return f"<!-- hermes-review-action:{action_id}{suffix} -->"
+
+
+def approval_dismisses_stale_reviews(pr: PullRequest) -> bool:
+    """Fail closed unless branch protection invalidates raced stale approvals."""
+    owner, repo = pr.repo.split("/", 1)
+    try:
+        protection = gh_json(
+            ["api", f"repos/{owner}/{repo}/branches/{pr.base_ref}/protection"]
+        )
+    except AutomationError:
+        return False
+    required = protection.get("required_pull_request_reviews") or {}
+    return required.get("dismiss_stale_reviews") is True
+
+
+def _decision_action_row(
+    db: sqlite3.Connection, decision_id: str
+) -> dict[str, Any]:
+    row = db.execute(
+        """
+        SELECT a.*, d.action, d.selected_candidate_ids, d.payload,
+               d.proposal_id, d.state AS decision_state,
+               p.conversation_id, p.revision_token, p.head_sha,
+               c.repo, c.pr_number, c.pr_url, c.owner_user_id
+        FROM workflow_actions a
+        JOIN proposal_decisions d ON d.id = a.decision_id
+        JOIN proposal_revisions p ON p.id = d.proposal_id
+        JOIN workflow_pr_conversations c ON c.id = p.conversation_id
+        WHERE d.id = ?
+        """,
+        (decision_id,),
+    ).fetchone()
+    if row is None:
+        raise AutomationError("decision has no executable action")
+    return _row_dict(row)
+
+
+def _record_action_publications(
+    db: sqlite3.Connection,
+    *,
+    action_id: str,
+    publications: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> int:
+    marker = action_marker(action_id)
+    recorded_candidates: set[str] = set()
+    for review in publications.get("reviews", []):
+        if marker not in str(review.get("body") or ""):
+            continue
+        db.execute(
+            """
+            INSERT OR IGNORE INTO action_publications(
+                action_id, candidate_id, kind, github_id, state, url, published_at
+            ) VALUES (?, NULL, 'review', ?, ?, ?, ?)
+            """,
+            (
+                action_id,
+                int(review["id"]),
+                str(review.get("state") or ""),
+                str(review.get("html_url") or ""),
+                str(review.get("submitted_at") or review.get("created_at") or ""),
+            ),
+        )
+    for comment in publications.get("comments", []):
+        body = str(comment.get("body") or "")
+        if marker[:-4] + ":" not in body:
+            continue
+        match = re.search(
+            re.escape(marker[:-4] + ":") + rf"({CANDIDATE_TOKEN_PATTERN}) -->",
+            body,
+        )
+        if match is None:
+            continue
+        candidate_id = match.group(1)
+        recorded_candidates.add(candidate_id)
+        db.execute(
+            """
+            INSERT OR IGNORE INTO action_publications(
+                action_id, candidate_id, kind, github_id, state, url, published_at
+            ) VALUES (?, ?, 'inline_comment', ?, 'COMMENTED', ?, ?)
+            """,
+            (
+                action_id,
+                candidate_id,
+                int(comment["id"]),
+                str(comment.get("html_url") or ""),
+                str(comment.get("created_at") or ""),
+            ),
+        )
+    db.commit()
+    return len(recorded_candidates)
+
+
+def _action_receipt(db: sqlite3.Connection, action_id: str) -> dict[str, Any]:
+    row = db.execute(
+        "SELECT state, receipt, error FROM workflow_actions WHERE id = ?",
+        (action_id,),
+    ).fetchone()
+    publications = db.execute(
+        "SELECT candidate_id, kind, github_id, state, url FROM action_publications "
+        "WHERE action_id = ? ORDER BY id",
+        (action_id,),
+    ).fetchall()
+    return {
+        "status": str(row["state"]),
+        "action_id": action_id,
+        "receipt": json.loads(str(row["receipt"])) if row["receipt"] else None,
+        "error": row["error"],
+        "publications": [_row_dict(item) for item in publications],
+    }
+
+
+def _finish_workflow_action(
+    db: sqlite3.Connection,
+    *,
+    decision_id: str,
+    action_id: str,
+    action: str,
+    proposal_id: str,
+    conversation_id: str,
+    head_sha: str,
+    comment_count: int,
+    receipt: Mapping[str, Any],
+) -> None:
+    stamp = iso(utc_now())
+    with db:
+        db.execute(
+            "UPDATE workflow_actions SET state = 'completed', receipt = ?, "
+            "completed_at = ?, lease_expires_at = NULL, error = NULL WHERE id = ?",
+            (json.dumps(dict(receipt), sort_keys=True), stamp, action_id),
+        )
+        db.execute(
+            "UPDATE proposal_decisions SET state = 'completed', completed_at = ?, "
+            "error = NULL WHERE id = ?",
+            (stamp, decision_id),
+        )
+        db.execute(
+            "UPDATE proposal_revisions SET state = 'completed', terminal_at = ? "
+            "WHERE id = ?",
+            (stamp, proposal_id),
+        )
+        db.execute(
+            "UPDATE proposal_reminders SET state = 'completed', updated_at = ? "
+            "WHERE proposal_id = ?",
+            (stamp, proposal_id),
+        )
+    linked = db.execute(
+        "SELECT COUNT(*) FROM workflow_request_members WHERE conversation_id = ?",
+        (conversation_id,),
+    ).fetchone()[0]
+    if linked:
+        outcome = {
+            "approve": "approved",
+            "publish": "comments_published",
+            "skip": "skipped",
+        }[action]
+        update_request_member_outcome(
+            db,
+            conversation_id=conversation_id,
+            outcome=outcome,
+            reviewed_head=head_sha,
+            published_comment_count=comment_count,
+        )
+
+
+def _block_workflow_action(
+    db: sqlite3.Connection,
+    *,
+    decision_id: str,
+    action_id: str,
+    proposal_id: str,
+    reason: str,
+    stale: bool = False,
+) -> dict[str, Any]:
+    stamp = iso(utc_now())
+    with db:
+        db.execute(
+            "UPDATE workflow_actions SET state = 'blocked', error = ?, "
+            "completed_at = ?, lease_expires_at = NULL WHERE id = ?",
+            (reason, stamp, action_id),
+        )
+        db.execute(
+            "UPDATE proposal_decisions SET state = ?, error = ?, completed_at = ? "
+            "WHERE id = ?",
+            ("rejected_stale" if stale else "blocked", reason, stamp, decision_id),
+        )
+        db.execute(
+            "UPDATE proposal_revisions SET state = ?, superseded_at = ? WHERE id = ?",
+            ("superseded" if stale else "awaiting_decision", stamp if stale else None, proposal_id),
+        )
+    return {
+        "status": "stale_head" if stale else "blocked",
+        "reason": reason,
+        "action_id": action_id,
+    }
+
+
+def _publishable_candidates(
+    context: Mapping[str, Any], selected: Sequence[str]
+) -> list[dict[str, Any]]:
+    available = {str(item["candidate_id"]): item for item in context["findings"]}
+    result: list[dict[str, Any]] = []
+    for candidate_id in selected:
+        finding = available.get(candidate_id)
+        if finding is None:
+            raise AutomationError(f"unknown proposal candidate {candidate_id}")
+        if not bool(finding["active"]):
+            raise AutomationError(f"proposal candidate {candidate_id} is dismissed")
+        if not all((finding.get("path"), finding.get("line"), finding.get("side"))):
+            raise AutomationError(
+                f"proposal candidate {candidate_id} lacks executable inline coordinates"
+            )
+        result.append(finding)
+    return result
+
+
+def execute_thread_command(
+    db: sqlite3.Connection,
+    *,
+    workspace_id: str,
+    dm_channel_id: str,
+    thread_ts: str,
+    owner_user_id: str,
+    command_text: str,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """Apply an exact owner command, with all GitHub writes behind fresh guards."""
+    context = thread_context(
+        db,
+        workspace_id=workspace_id,
+        dm_channel_id=dm_channel_id,
+        thread_ts=thread_ts,
+        owner_user_id=owner_user_id,
+    )
+    command = parse_decision_command(command_text)
+    if command is None:
+        return {
+            "status": "read_only",
+            "conversation_id": context["conversation_id"],
+            "revision_token": context["revision_token"],
+        }
+    if command.revision_token != str(context["revision_token"]):
+        raise AutomationError("proposal revision does not match the current thread revision")
+    candidate_ids = {str(item["candidate_id"]) for item in context["findings"]}
+    missing = [item for item in command.candidate_ids if item not in candidate_ids]
+    if missing:
+        raise AutomationError(f"unknown proposal candidate {missing[0]}")
+    selected_findings = (
+        _publishable_candidates(context, command.candidate_ids)
+        if command.action == "publish"
+        else []
+    )
+    payload = {"body": command.body} if command.body is not None else {}
+    decision_id, created = record_proposal_decision(
+        db,
+        conversation_id=str(context["conversation_id"]),
+        revision_token=command.revision_token,
+        owner_user_id=owner_user_id,
+        action=command.action,
+        selected_candidate_ids=command.candidate_ids,
+        payload=payload,
+        idempotency_key=idempotency_key,
+    )
+    if command.action in {"edit", "dismiss"}:
+        if command.action == "edit" and not str(command.body or "").strip():
+            raise AutomationError("edited comment body cannot be empty")
+        db.execute(
+            "UPDATE proposal_decisions SET state = 'completed', completed_at = ? "
+            "WHERE id = ?",
+            (iso(utc_now()), decision_id),
+        )
+        db.commit()
+        return {
+            "status": "updated",
+            "action": command.action,
+            "created": created,
+            "proposal": proposal_context(
+                db,
+                conversation_id=str(context["conversation_id"]),
+                revision_token=command.revision_token,
+            ),
+        }
+
+    claim_state, action_id = claim_decision_action(
+        db, decision_id=decision_id, claimant="decision-cli"
+    )
+    if claim_state == "completed":
+        return _action_receipt(db, action_id)
+    if claim_state in {"blocked", "failed", "in_progress"}:
+        return _action_receipt(db, action_id)
+    action_row = _decision_action_row(db, decision_id)
+    pr = load_pr(str(action_row["pr_url"]))
+    if (
+        pr.repo.lower() != str(action_row["repo"]).lower()
+        or pr.number != int(action_row["pr_number"])
+    ):
+        return _block_workflow_action(
+            db,
+            decision_id=decision_id,
+            action_id=action_id,
+            proposal_id=str(action_row["proposal_id"]),
+            reason="GitHub returned a different pull request target",
+        )
+    if pr.state != "OPEN":
+        return _block_workflow_action(
+            db,
+            decision_id=decision_id,
+            action_id=action_id,
+            proposal_id=str(action_row["proposal_id"]),
+            reason=f"pull request is {pr.state.lower()}",
+        )
+    expected_head = str(action_row["expected_head"])
+    if pr.head_sha != expected_head:
+        return _block_workflow_action(
+            db,
+            decision_id=decision_id,
+            action_id=action_id,
+            proposal_id=str(action_row["proposal_id"]),
+            reason=f"stale_head: expected {expected_head}, current {pr.head_sha}",
+            stale=True,
+        )
+    if command.action == "skip":
+        receipt = {"action": "skip", "head_sha": expected_head}
+        _finish_workflow_action(
+            db,
+            decision_id=decision_id,
+            action_id=action_id,
+            action="skip",
+            proposal_id=str(action_row["proposal_id"]),
+            conversation_id=str(action_row["conversation_id"]),
+            head_sha=expected_head,
+            comment_count=0,
+            receipt=receipt,
+        )
+        return _action_receipt(db, action_id)
+
+    login = reviewer_login()
+    if command.action == "approve":
+        if pr.author_login.lower() == login.lower():
+            return _block_workflow_action(
+                db,
+                decision_id=decision_id,
+                action_id=action_id,
+                proposal_id=str(action_row["proposal_id"]),
+                reason="self-authored pull requests cannot be approved",
+            )
+        if not approval_dismisses_stale_reviews(pr):
+            return _block_workflow_action(
+                db,
+                decision_id=decision_id,
+                action_id=action_id,
+                proposal_id=str(action_row["proposal_id"]),
+                reason="branch protection does not prove stale approvals are dismissed",
+            )
+
+    before = github_publications(pr, login)
+    recovered_count = _record_action_publications(
+        db, action_id=action_id, publications=before
+    )
+    if command.action == "approve":
+        recovered = db.execute(
+            "SELECT COUNT(*) FROM action_publications WHERE action_id = ? "
+            "AND kind = 'review'",
+            (action_id,),
+        ).fetchone()[0] > 0
+    else:
+        recovered = recovered_count == len(command.candidate_ids)
+    owner, repo = pr.repo.split("/", 1)
+    if not recovered:
+        if command.action == "approve":
+            payload: dict[str, Any] = {
+                "commit_id": expected_head,
+                "event": "APPROVE",
+                "body": action_marker(action_id),
+            }
+        else:
+            recorded_candidate_ids = {
+                str(row["candidate_id"])
+                for row in db.execute(
+                    "SELECT candidate_id FROM action_publications "
+                    "WHERE action_id = ? AND kind = 'inline_comment'",
+                    (action_id,),
+                ).fetchall()
+            }
+            comments = []
+            for finding in selected_findings:
+                if str(finding["candidate_id"]) in recorded_candidate_ids:
+                    continue
+                comment = {
+                    "path": finding["path"],
+                    "line": int(finding["line"]),
+                    "side": finding["side"],
+                    "body": str(finding["body"]).rstrip()
+                    + "\n\n"
+                    + action_marker(action_id, str(finding["candidate_id"])),
+                }
+                if finding.get("start_line") is not None:
+                    comment["start_line"] = int(finding["start_line"])
+                    comment["start_side"] = finding["start_side"]
+                comments.append(comment)
+            payload = {
+                "commit_id": expected_head,
+                "event": "COMMENT",
+                "body": action_marker(action_id),
+                "comments": comments,
+            }
+        github_json_request(
+            "POST", f"repos/{owner}/{repo}/pulls/{pr.number}/reviews", payload
+        )
+        after = github_publications(pr, login)
+        recovered_count = _record_action_publications(
+            db, action_id=action_id, publications=after
+        )
+        if command.action == "approve":
+            recovered = any(
+                action_marker(action_id) in str(item.get("body") or "")
+                and str(item.get("state") or "").upper() == "APPROVED"
+                for item in after.get("reviews", [])
+            )
+        else:
+            recovered = recovered_count == len(command.candidate_ids)
+    if not recovered:
+        db.execute(
+            "UPDATE workflow_actions SET state = 'executing', error = ?, "
+            "lease_expires_at = NULL WHERE id = ?",
+            ("GitHub write receipt is not yet reconcilable", action_id),
+        )
+        db.commit()
+        return {
+            "status": "recovery_required",
+            "reason": "GitHub write receipt is not yet reconcilable; retry the exact command",
+            "action_id": action_id,
+        }
+
+    post_write = load_pr(pr.url)
+    receipt = {
+        "action": command.action,
+        "head_sha": expected_head,
+        "comment_count": 0 if command.action == "approve" else len(command.candidate_ids),
+        "head_changed_after_write": post_write.head_sha != expected_head,
+    }
+    _finish_workflow_action(
+        db,
+        decision_id=decision_id,
+        action_id=action_id,
+        action=command.action,
+        proposal_id=str(action_row["proposal_id"]),
+        conversation_id=str(action_row["conversation_id"]),
+        head_sha=expected_head,
+        comment_count=receipt["comment_count"],
+        receipt=receipt,
+    )
+    return _action_receipt(db, action_id)
+
+
+def decide_thread_command(
+    *,
+    workspace_id: str,
+    dm_channel_id: str,
+    thread_ts: str,
+    owner_user_id: str,
+    command_text: str,
+    idempotency_key: str,
+    db_path: str | None = None,
+) -> dict[str, Any]:
+    with connect_db(db_path) as db:
+        return execute_thread_command(
+            db,
+            workspace_id=workspace_id,
+            dm_channel_id=dm_channel_id,
+            thread_ts=thread_ts,
+            owner_user_id=owner_user_id,
+            command_text=command_text,
+            idempotency_key=idempotency_key,
+        )
+
+
 def recover_run_ids(
     run_ids: Iterable[str],
     db_path: str | None = None,
@@ -2843,13 +3636,38 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", help="override the SQLite database path")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init", help="initialize or migrate the database")
-    review = subparsers.add_parser("review", help="delegate and persist exact PR reviews")
-    review.add_argument(
-        "--allow-self-review",
-        action="store_true",
-        help="allow PRs authored by the authenticated GitHub user",
+    def add_proposal_arguments(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--workspace-id", required=True)
+        command.add_argument("--source-channel-id", required=True)
+        command.add_argument("--source-message-ts", required=True)
+        command.add_argument("--requester-user-id", required=True)
+        command.add_argument("--owner-user-id", required=True)
+        command.add_argument("urls", nargs="+")
+
+    propose = subparsers.add_parser(
+        "propose", help="generate read-only proposals for exact PR URLs"
     )
-    review.add_argument("urls", nargs="+")
+    add_proposal_arguments(propose)
+    review = subparsers.add_parser(
+        "review", help="compatibility alias for read-only proposal generation"
+    )
+    add_proposal_arguments(review)
+    context = subparsers.add_parser(
+        "thread-context", help="load the proposal mapped to one private Slack thread"
+    )
+    context.add_argument("--workspace-id", required=True)
+    context.add_argument("--dm-channel-id", required=True)
+    context.add_argument("--thread-ts", required=True)
+    context.add_argument("--owner-user-id")
+    decide = subparsers.add_parser(
+        "decide", help="apply one exact revision-bound owner command"
+    )
+    decide.add_argument("--workspace-id", required=True)
+    decide.add_argument("--dm-channel-id", required=True)
+    decide.add_argument("--thread-ts", required=True)
+    decide.add_argument("--owner-user-id", required=True)
+    decide.add_argument("--idempotency-key", required=True)
+    decide.add_argument("--command-text", required=True)
     recover = subparsers.add_parser(
         "recover", help="reconcile interrupted review runs and clean their Paseo agents"
     )
@@ -2877,12 +3695,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             with connect_db(args.db) as db:
                 version = db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
             emit({"status": "ready", "schema_version": version, "database": args.db or os.environ.get("REVIEW_HISTORY_DB", DEFAULT_DB)})
-        elif args.command == "review":
+        elif args.command in {"propose", "review"}:
             emit(
-                review_urls(
+                propose_urls(
                     args.urls,
-                    args.db,
-                    allow_self_review=args.allow_self_review,
+                    db_path=args.db,
+                    workspace_id=args.workspace_id,
+                    source_channel_id=args.source_channel_id,
+                    source_message_ts=args.source_message_ts,
+                    requester_user_id=args.requester_user_id,
+                    owner_user_id=args.owner_user_id,
+                )
+            )
+        elif args.command == "thread-context":
+            with connect_db(args.db) as db:
+                emit(
+                    thread_context(
+                        db,
+                        workspace_id=args.workspace_id,
+                        dm_channel_id=args.dm_channel_id,
+                        thread_ts=args.thread_ts,
+                        owner_user_id=args.owner_user_id,
+                    )
+                )
+        elif args.command == "decide":
+            emit(
+                decide_thread_command(
+                    db_path=args.db,
+                    workspace_id=args.workspace_id,
+                    dm_channel_id=args.dm_channel_id,
+                    thread_ts=args.thread_ts,
+                    owner_user_id=args.owner_user_id,
+                    command_text=args.command_text,
+                    idempotency_key=args.idempotency_key,
                 )
             )
         elif args.command == "recover":
