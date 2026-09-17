@@ -283,7 +283,1603 @@ def migrate(db: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?)",
         (iso(utc_now()),),
     )
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS workflow_source_requests (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            message_ts TEXT NOT NULL,
+            requester_user_id TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            verdict_message_ts TEXT,
+            reaction_name TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(workspace_id, channel_id, message_ts)
+        );
+        CREATE TABLE IF NOT EXISTS workflow_pr_conversations (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            owner_user_id TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            pr_number INTEGER NOT NULL,
+            pr_url TEXT NOT NULL,
+            dm_channel_id TEXT,
+            thread_ts TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(workspace_id, owner_user_id, repo, pr_number)
+        );
+        CREATE TABLE IF NOT EXISTS workflow_request_members (
+            request_id TEXT NOT NULL
+                REFERENCES workflow_source_requests(id) ON DELETE CASCADE,
+            conversation_id TEXT NOT NULL
+                REFERENCES workflow_pr_conversations(id) ON DELETE CASCADE,
+            position INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            outcome TEXT,
+            reviewed_head TEXT,
+            published_comment_count INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(request_id, conversation_id),
+            UNIQUE(request_id, position)
+        );
+        CREATE INDEX IF NOT EXISTS workflow_request_members_conversation_idx
+            ON workflow_request_members(conversation_id, request_id);
+        CREATE TABLE IF NOT EXISTS proposal_revisions (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL
+                REFERENCES workflow_pr_conversations(id) ON DELETE CASCADE,
+            revision_number INTEGER NOT NULL,
+            revision_token TEXT NOT NULL,
+            head_sha TEXT NOT NULL,
+            baseline_head_sha TEXT,
+            state TEXT NOT NULL,
+            objective TEXT,
+            proposed_action TEXT,
+            summary TEXT,
+            delta_available INTEGER,
+            structured_result TEXT,
+            created_at TEXT NOT NULL,
+            ready_at TEXT,
+            superseded_at TEXT,
+            terminal_at TEXT,
+            UNIQUE(conversation_id, revision_number),
+            UNIQUE(conversation_id, revision_token)
+        );
+        CREATE INDEX IF NOT EXISTS proposal_revisions_current_idx
+            ON proposal_revisions(conversation_id, state, revision_number DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS proposal_revisions_one_active_idx
+            ON proposal_revisions(conversation_id)
+            WHERE state IN (
+                'queued', 'analyzing', 'output_pending',
+                'awaiting_decision', 'publishing'
+            );
+        CREATE TABLE IF NOT EXISTS proposal_findings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            proposal_id TEXT NOT NULL
+                REFERENCES proposal_revisions(id) ON DELETE CASCADE,
+            candidate_id TEXT NOT NULL,
+            category TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            path TEXT,
+            line INTEGER,
+            start_line INTEGER,
+            side TEXT,
+            start_side TEXT,
+            body TEXT NOT NULL,
+            blocking INTEGER NOT NULL,
+            evidence TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(proposal_id, candidate_id)
+        );
+        CREATE TABLE IF NOT EXISTS proposal_decisions (
+            id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL
+                REFERENCES proposal_revisions(id) ON DELETE CASCADE,
+            owner_user_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            selected_candidate_ids TEXT NOT NULL DEFAULT '[]',
+            payload TEXT NOT NULL DEFAULT '{}',
+            idempotency_key TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL DEFAULT 'accepted',
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            error TEXT
+        );
+        CREATE INDEX IF NOT EXISTS proposal_decisions_proposal_idx
+            ON proposal_decisions(proposal_id, created_at);
+        CREATE TABLE IF NOT EXISTS workflow_actions (
+            id TEXT PRIMARY KEY,
+            decision_id TEXT NOT NULL
+                REFERENCES proposal_decisions(id) ON DELETE CASCADE,
+            action_type TEXT NOT NULL,
+            expected_head TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'pending',
+            claimant TEXT,
+            lease_expires_at TEXT,
+            receipt TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            UNIQUE(decision_id, action_type)
+        );
+        CREATE INDEX IF NOT EXISTS workflow_actions_claim_idx
+            ON workflow_actions(state, lease_expires_at);
+        CREATE TABLE IF NOT EXISTS action_publications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action_id TEXT NOT NULL
+                REFERENCES workflow_actions(id) ON DELETE CASCADE,
+            candidate_id TEXT,
+            kind TEXT NOT NULL,
+            github_id INTEGER NOT NULL,
+            state TEXT,
+            url TEXT,
+            published_at TEXT,
+            UNIQUE(kind, github_id),
+            UNIQUE(action_id, candidate_id, kind)
+        );
+        CREATE TABLE IF NOT EXISTS slack_deliveries (
+            id TEXT PRIMARY KEY,
+            delivery_key TEXT NOT NULL UNIQUE,
+            kind TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            thread_ts TEXT,
+            request_id TEXT REFERENCES workflow_source_requests(id) ON DELETE CASCADE,
+            conversation_id TEXT
+                REFERENCES workflow_pr_conversations(id) ON DELETE CASCADE,
+            proposal_id TEXT REFERENCES proposal_revisions(id) ON DELETE CASCADE,
+            metadata_key TEXT,
+            state TEXT NOT NULL DEFAULT 'pending',
+            claimant TEXT,
+            lease_expires_at TEXT,
+            message_ts TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS slack_deliveries_claim_idx
+            ON slack_deliveries(state, lease_expires_at);
+        CREATE TABLE IF NOT EXISTS proposal_reminders (
+            id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL UNIQUE
+                REFERENCES proposal_revisions(id) ON DELETE CASCADE,
+            stage INTEGER NOT NULL DEFAULT 1,
+            state TEXT NOT NULL DEFAULT 'scheduled',
+            due_at TEXT,
+            claimant TEXT,
+            lease_expires_at TEXT,
+            delivery_id TEXT REFERENCES slack_deliveries(id),
+            last_sent_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS proposal_reminders_due_idx
+            ON proposal_reminders(state, due_at, lease_expires_at);
+        CREATE TABLE IF NOT EXISTS analysis_attempts (
+            id TEXT PRIMARY KEY,
+            proposal_id TEXT NOT NULL
+                REFERENCES proposal_revisions(id) ON DELETE CASCADE,
+            claimant TEXT NOT NULL,
+            state TEXT NOT NULL,
+            expected_head TEXT NOT NULL,
+            lease_expires_at TEXT,
+            heartbeat_at TEXT NOT NULL,
+            output TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            error TEXT
+        );
+        CREATE INDEX IF NOT EXISTS analysis_attempts_reclaim_idx
+            ON analysis_attempts(state, lease_expires_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS analysis_attempts_one_active_idx
+            ON analysis_attempts(proposal_id)
+            WHERE state IN ('running', 'output_received', 'ready_to_persist');
+        """
+    )
+    db.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?)",
+        (iso(utc_now()),),
+    )
     db.commit()
+
+
+ACTIVE_PROPOSAL_STATES = {
+    "queued",
+    "analyzing",
+    "output_pending",
+    "awaiting_decision",
+    "publishing",
+}
+
+
+def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {key: row[key] for key in row.keys()}
+
+
+def _begin_immediate(db: sqlite3.Connection) -> None:
+    if db.in_transaction:
+        db.commit()
+    db.execute("BEGIN IMMEDIATE")
+
+
+def get_or_create_source_request(
+    db: sqlite3.Connection,
+    *,
+    workspace_id: str,
+    channel_id: str,
+    message_ts: str,
+    requester_user_id: str,
+) -> tuple[str, bool]:
+    """Return the durable source request for one exact Slack message."""
+    if not all((workspace_id, channel_id, message_ts, requester_user_id)):
+        raise AutomationError("source request identity is incomplete")
+    now = iso(utc_now())
+    request_id = str(uuid.uuid4())
+    try:
+        _begin_immediate(db)
+        cursor = db.execute(
+            """
+            INSERT OR IGNORE INTO workflow_source_requests(
+                id, workspace_id, channel_id, message_ts, requester_user_id,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request_id,
+                workspace_id,
+                channel_id,
+                message_ts,
+                requester_user_id,
+                now,
+                now,
+            ),
+        )
+        created = cursor.rowcount == 1
+        row = db.execute(
+            """
+            SELECT id, requester_user_id
+            FROM workflow_source_requests
+            WHERE workspace_id = ? AND channel_id = ? AND message_ts = ?
+            """,
+            (workspace_id, channel_id, message_ts),
+        ).fetchone()
+        if row is None:
+            raise AutomationError("failed to persist source request")
+        if str(row["requester_user_id"]) != requester_user_id:
+            raise AutomationError("source request identity belongs to another requester")
+        db.commit()
+        return str(row["id"]), created
+    except Exception:
+        db.rollback()
+        raise
+
+
+def get_or_create_pr_conversation(
+    db: sqlite3.Connection,
+    *,
+    workspace_id: str,
+    owner_user_id: str,
+    repo: str,
+    pr_number: int,
+    pr_url: str,
+) -> tuple[str, bool]:
+    """Reuse one private conversation for a PR across requests and heads."""
+    if not all((workspace_id, owner_user_id, repo, pr_url)) or pr_number < 1:
+        raise AutomationError("PR conversation identity is incomplete")
+    now = iso(utc_now())
+    conversation_id = str(uuid.uuid4())
+    try:
+        _begin_immediate(db)
+        cursor = db.execute(
+            """
+            INSERT OR IGNORE INTO workflow_pr_conversations(
+                id, workspace_id, owner_user_id, repo, pr_number, pr_url,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                conversation_id,
+                workspace_id,
+                owner_user_id,
+                repo,
+                pr_number,
+                pr_url,
+                now,
+                now,
+            ),
+        )
+        created = cursor.rowcount == 1
+        row = db.execute(
+            """
+            SELECT id, pr_url
+            FROM workflow_pr_conversations
+            WHERE workspace_id = ? AND owner_user_id = ?
+              AND repo = ? AND pr_number = ?
+            """,
+            (workspace_id, owner_user_id, repo, pr_number),
+        ).fetchone()
+        if row is None:
+            raise AutomationError("failed to persist PR conversation")
+        if str(row["pr_url"]) != pr_url:
+            db.execute(
+                """
+                UPDATE workflow_pr_conversations
+                SET pr_url = ?, updated_at = ? WHERE id = ?
+                """,
+                (pr_url, now, row["id"]),
+            )
+        db.commit()
+        return str(row["id"]), created
+    except Exception:
+        db.rollback()
+        raise
+
+
+def bind_pr_conversation_thread(
+    db: sqlite3.Connection,
+    conversation_id: str,
+    *,
+    dm_channel_id: str,
+    thread_ts: str,
+) -> None:
+    """Bind a stable conversation once; reject an attempt to move its thread."""
+    try:
+        _begin_immediate(db)
+        row = db.execute(
+            """
+            SELECT dm_channel_id, thread_ts
+            FROM workflow_pr_conversations WHERE id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            raise AutomationError("unknown PR conversation")
+        existing = (row["dm_channel_id"], row["thread_ts"])
+        requested = (dm_channel_id, thread_ts)
+        if existing != (None, None) and existing != requested:
+            raise AutomationError("PR conversation is already bound to another thread")
+        db.execute(
+            """
+            UPDATE workflow_pr_conversations
+            SET dm_channel_id = ?, thread_ts = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (dm_channel_id, thread_ts, iso(utc_now()), conversation_id),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def associate_request_conversation(
+    db: sqlite3.Connection,
+    request_id: str,
+    conversation_id: str,
+    *,
+    position: int,
+) -> bool:
+    """Idempotently attach a PR conversation to one source request."""
+    if position < 0:
+        raise AutomationError("request member position cannot be negative")
+    try:
+        _begin_immediate(db)
+        existing = db.execute(
+            """
+            SELECT position FROM workflow_request_members
+            WHERE request_id = ? AND conversation_id = ?
+            """,
+            (request_id, conversation_id),
+        ).fetchone()
+        if existing is not None:
+            if int(existing["position"]) != position:
+                raise AutomationError("request member already has another position")
+            db.commit()
+            return False
+        db.execute(
+            """
+            INSERT INTO workflow_request_members(
+                request_id, conversation_id, position, updated_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (request_id, conversation_id, position, iso(utc_now())),
+        )
+        db.commit()
+        return True
+    except sqlite3.IntegrityError as exc:
+        db.rollback()
+        raise AutomationError("request member conflicts with persisted ordering") from exc
+    except Exception:
+        db.rollback()
+        raise
+
+
+def source_requests_for_conversation(
+    db: sqlite3.Connection,
+    conversation_id: str,
+) -> list[dict[str, Any]]:
+    rows = db.execute(
+        """
+        SELECT r.*, m.position, m.state AS member_state, m.outcome,
+               m.reviewed_head, m.published_comment_count, m.error AS member_error
+        FROM workflow_source_requests r
+        JOIN workflow_request_members m ON m.request_id = r.id
+        WHERE m.conversation_id = ?
+        ORDER BY r.created_at, r.id
+        """,
+        (conversation_id,),
+    ).fetchall()
+    return [_row_dict(row) for row in rows]
+
+
+def conversation_for_slack_thread(
+    db: sqlite3.Connection,
+    *,
+    workspace_id: str,
+    dm_channel_id: str,
+    thread_ts: str,
+) -> dict[str, Any] | None:
+    """Resolve an owner reply to its stable PR conversation and active proposal."""
+    row = db.execute(
+        """
+        SELECT c.*, p.id AS proposal_id, p.revision_token,
+               p.head_sha AS proposal_head, p.state AS proposal_state
+        FROM workflow_pr_conversations c
+        LEFT JOIN proposal_revisions p
+          ON p.id = (
+              SELECT latest.id FROM proposal_revisions latest
+              WHERE latest.conversation_id = c.id
+                AND latest.state IN ('queued', 'analyzing', 'output_pending',
+                                     'awaiting_decision', 'publishing')
+              ORDER BY latest.revision_number DESC LIMIT 1
+          )
+        WHERE c.workspace_id = ? AND c.dm_channel_id = ? AND c.thread_ts = ?
+        """,
+        (workspace_id, dm_channel_id, thread_ts),
+    ).fetchone()
+    return _row_dict(row) if row is not None else None
+
+
+TERMINAL_MEMBER_OUTCOMES = {
+    "approved",
+    "comments_published",
+    "skipped",
+    "merged_externally",
+    "closed_externally",
+    "failed",
+    "operator_blocked",
+}
+
+
+def _refresh_source_request_locked(
+    db: sqlite3.Connection,
+    request_id: str,
+    *,
+    stamp: str,
+) -> tuple[str, str]:
+    member_states = [
+        str(row["state"])
+        for row in db.execute(
+            "SELECT state FROM workflow_request_members WHERE request_id = ?",
+            (request_id,),
+        ).fetchall()
+    ]
+    if not member_states or any(
+        state in {"failed", "operator_blocked"} for state in member_states
+    ):
+        request_state = "failed"
+        reaction = "warning"
+    elif any(state not in TERMINAL_MEMBER_OUTCOMES for state in member_states):
+        request_state = "pending"
+        reaction = "eyes"
+    else:
+        request_state = "completed"
+        reaction = "white_check_mark"
+    db.execute(
+        """
+        UPDATE workflow_source_requests
+        SET state = ?, reaction_name = ?, updated_at = ? WHERE id = ?
+        """,
+        (request_state, reaction, stamp, request_id),
+    )
+    return request_state, reaction
+
+
+def update_request_member_outcome(
+    db: sqlite3.Connection,
+    *,
+    conversation_id: str,
+    outcome: str,
+    reviewed_head: str,
+    published_comment_count: int = 0,
+    error: str | None = None,
+) -> list[str]:
+    """Project one PR outcome to every source request that references it."""
+    if outcome not in TERMINAL_MEMBER_OUTCOMES:
+        raise AutomationError("request member outcome is not terminal")
+    if published_comment_count < 0:
+        raise AutomationError("published comment count cannot be negative")
+    stamp = iso(utc_now())
+    try:
+        _begin_immediate(db)
+        request_ids = [
+            str(row["request_id"])
+            for row in db.execute(
+                """
+                SELECT request_id FROM workflow_request_members
+                WHERE conversation_id = ? ORDER BY request_id
+                """,
+                (conversation_id,),
+            ).fetchall()
+        ]
+        if not request_ids:
+            raise AutomationError("PR conversation has no linked source requests")
+        db.execute(
+            """
+            UPDATE workflow_request_members
+            SET state = ?, outcome = ?, reviewed_head = ?,
+                published_comment_count = ?, error = ?, updated_at = ?
+            WHERE conversation_id = ?
+            """,
+            (
+                outcome,
+                outcome,
+                reviewed_head,
+                published_comment_count,
+                error,
+                stamp,
+                conversation_id,
+            ),
+        )
+        for request_id in request_ids:
+            _refresh_source_request_locked(db, request_id, stamp=stamp)
+        db.commit()
+        return request_ids
+    except Exception:
+        db.rollback()
+        raise
+
+
+def source_request_projection(
+    db: sqlite3.Connection,
+    request_id: str,
+) -> dict[str, Any]:
+    request = db.execute(
+        "SELECT * FROM workflow_source_requests WHERE id = ?",
+        (request_id,),
+    ).fetchone()
+    if request is None:
+        raise AutomationError("unknown source request")
+    members = db.execute(
+        """
+        SELECT m.*, c.repo, c.pr_number, c.pr_url
+        FROM workflow_request_members m
+        JOIN workflow_pr_conversations c ON c.id = m.conversation_id
+        WHERE m.request_id = ? ORDER BY m.position
+        """,
+        (request_id,),
+    ).fetchall()
+    result = _row_dict(request)
+    result["members"] = [_row_dict(row) for row in members]
+    return result
+
+
+def bind_source_verdict(
+    db: sqlite3.Connection,
+    *,
+    request_id: str,
+    verdict_message_ts: str,
+) -> None:
+    """Persist the single verdict message used for all later source updates."""
+    try:
+        _begin_immediate(db)
+        row = db.execute(
+            "SELECT verdict_message_ts FROM workflow_source_requests WHERE id = ?",
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            raise AutomationError("unknown source request")
+        existing = row["verdict_message_ts"]
+        if existing is not None and str(existing) != verdict_message_ts:
+            raise AutomationError("source request already has another verdict message")
+        db.execute(
+            """
+            UPDATE workflow_source_requests
+            SET verdict_message_ts = ?, updated_at = ? WHERE id = ?
+            """,
+            (verdict_message_ts, iso(utc_now()), request_id),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _create_proposal_revision_locked(
+    db: sqlite3.Connection,
+    conversation_id: str,
+    *,
+    head_sha: str,
+    baseline_head_sha: str | None,
+    state: str,
+    now: datetime,
+) -> dict[str, Any]:
+    existing = db.execute(
+        """
+        SELECT * FROM proposal_revisions
+        WHERE conversation_id = ? AND head_sha = ?
+          AND state IN ('queued', 'analyzing', 'output_pending',
+                        'awaiting_decision', 'publishing')
+        ORDER BY revision_number DESC LIMIT 1
+        """,
+        (conversation_id, head_sha),
+    ).fetchone()
+    if existing is not None:
+        result = _row_dict(existing)
+        result["created"] = False
+        return result
+
+    conversation = db.execute(
+        "SELECT id FROM workflow_pr_conversations WHERE id = ?",
+        (conversation_id,),
+    ).fetchone()
+    if conversation is None:
+        raise AutomationError("unknown PR conversation")
+
+    stamp = iso(now)
+    db.execute(
+        """
+        UPDATE proposal_revisions
+        SET state = 'superseded', superseded_at = ?
+        WHERE conversation_id = ?
+          AND state IN ('queued', 'analyzing', 'output_pending',
+                        'awaiting_decision', 'publishing')
+        """,
+        (stamp, conversation_id),
+    )
+    db.execute(
+        """
+        UPDATE proposal_decisions
+        SET state = 'rejected_stale', completed_at = ?,
+            error = 'proposal superseded by a newer revision'
+        WHERE proposal_id IN (
+            SELECT id FROM proposal_revisions
+            WHERE conversation_id = ? AND state = 'superseded'
+        ) AND state IN ('accepted', 'executing')
+        """,
+        (stamp, conversation_id),
+    )
+    next_number = int(
+        db.execute(
+            """
+            SELECT COALESCE(MAX(revision_number), 0) + 1
+            FROM proposal_revisions WHERE conversation_id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()[0]
+    )
+    proposal_id = str(uuid.uuid4())
+    token = f"P{next_number}"
+    db.execute(
+        """
+        INSERT INTO proposal_revisions(
+            id, conversation_id, revision_number, revision_token,
+            head_sha, baseline_head_sha, state, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            proposal_id,
+            conversation_id,
+            next_number,
+            token,
+            head_sha,
+            baseline_head_sha,
+            state,
+            stamp,
+        ),
+    )
+    db.execute(
+        """
+        UPDATE workflow_request_members
+        SET state = 'analyzing', reviewed_head = ?, updated_at = ?
+        WHERE conversation_id = ? AND state NOT IN (
+            'approved', 'comments_published', 'skipped',
+            'merged_externally', 'closed_externally'
+        )
+        """,
+        (head_sha, stamp, conversation_id),
+    )
+    return {
+        "id": proposal_id,
+        "conversation_id": conversation_id,
+        "revision_number": next_number,
+        "revision_token": token,
+        "head_sha": head_sha,
+        "baseline_head_sha": baseline_head_sha,
+        "state": state,
+        "created_at": stamp,
+        "created": True,
+    }
+
+
+def create_proposal_revision(
+    db: sqlite3.Connection,
+    conversation_id: str,
+    *,
+    head_sha: str,
+    baseline_head_sha: str | None = None,
+    state: str = "queued",
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Create the next immutable, head-bound proposal revision."""
+    if not head_sha:
+        raise AutomationError("proposal head is required")
+    if state not in ACTIVE_PROPOSAL_STATES:
+        raise AutomationError("new proposal must start in an active state")
+    try:
+        _begin_immediate(db)
+        result = _create_proposal_revision_locked(
+            db,
+            conversation_id,
+            head_sha=head_sha,
+            baseline_head_sha=baseline_head_sha,
+            state=state,
+            now=now or utc_now(),
+        )
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+
+
+def active_proposal(
+    db: sqlite3.Connection,
+    conversation_id: str,
+) -> dict[str, Any] | None:
+    row = db.execute(
+        """
+        SELECT * FROM proposal_revisions
+        WHERE conversation_id = ?
+          AND state IN ('queued', 'analyzing', 'output_pending',
+                        'awaiting_decision', 'publishing')
+        ORDER BY revision_number DESC LIMIT 1
+        """,
+        (conversation_id,),
+    ).fetchone()
+    return _row_dict(row) if row is not None else None
+
+
+def validate_proposal_revision(
+    db: sqlite3.Connection,
+    *,
+    conversation_id: str,
+    revision_token: str,
+    owner_user_id: str | None = None,
+) -> dict[str, Any]:
+    row = db.execute(
+        """
+        SELECT p.*, c.owner_user_id
+        FROM proposal_revisions p
+        JOIN workflow_pr_conversations c ON c.id = p.conversation_id
+        WHERE p.conversation_id = ? AND p.revision_token = ?
+        """,
+        (conversation_id, revision_token),
+    ).fetchone()
+    if row is None:
+        raise AutomationError("unknown proposal revision")
+    if str(row["state"]) not in ACTIVE_PROPOSAL_STATES:
+        raise AutomationError(f"proposal revision is {row['state']}, not active")
+    if owner_user_id is not None and str(row["owner_user_id"]) != owner_user_id:
+        raise AutomationError("decision owner does not match the PR conversation")
+    return _row_dict(row)
+
+
+def claim_analysis_attempt(
+    db: sqlite3.Connection,
+    proposal_id: str,
+    *,
+    claimant: str,
+    now: datetime | None = None,
+    lease_seconds: int = 900,
+) -> tuple[str, str]:
+    """Claim one analysis lease, returning (claim state, attempt id)."""
+    moment = now or utc_now()
+    stamp = iso(moment)
+    expires = iso(moment + timedelta(seconds=lease_seconds))
+    try:
+        _begin_immediate(db)
+        proposal = db.execute(
+            "SELECT id, head_sha, state FROM proposal_revisions WHERE id = ?",
+            (proposal_id,),
+        ).fetchone()
+        if proposal is None:
+            raise AutomationError("unknown proposal")
+        if str(proposal["state"]) not in {"queued", "analyzing", "output_pending"}:
+            raise AutomationError("proposal is not eligible for analysis")
+        existing = db.execute(
+            """
+            SELECT id, state, lease_expires_at FROM analysis_attempts
+            WHERE proposal_id = ?
+              AND state IN ('running', 'output_received', 'ready_to_persist')
+            ORDER BY started_at DESC LIMIT 1
+            """,
+            (proposal_id,),
+        ).fetchone()
+        if existing is not None:
+            existing_state = str(existing["state"])
+            if existing_state in {"output_received", "ready_to_persist"}:
+                db.commit()
+                return "output_ready", str(existing["id"])
+            lease_expires_at = str(existing["lease_expires_at"] or "")
+            if lease_expires_at > stamp:
+                db.commit()
+                return "in_progress", str(existing["id"])
+            db.execute(
+                """
+                UPDATE analysis_attempts
+                SET state = 'expired', completed_at = ?,
+                    error = 'analysis lease expired'
+                WHERE id = ?
+                """,
+                (stamp, existing["id"]),
+            )
+        attempt_id = str(uuid.uuid4())
+        db.execute(
+            """
+            INSERT INTO analysis_attempts(
+                id, proposal_id, claimant, state, expected_head,
+                lease_expires_at, heartbeat_at, started_at
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+            """,
+            (
+                attempt_id,
+                proposal_id,
+                claimant,
+                proposal["head_sha"],
+                expires,
+                stamp,
+                stamp,
+            ),
+        )
+        db.execute(
+            "UPDATE proposal_revisions SET state = 'analyzing' WHERE id = ?",
+            (proposal_id,),
+        )
+        db.commit()
+        return "claimed", attempt_id
+    except Exception:
+        db.rollback()
+        raise
+
+
+def heartbeat_analysis_attempt(
+    db: sqlite3.Connection,
+    *,
+    attempt_id: str,
+    claimant: str,
+    now: datetime | None = None,
+    lease_seconds: int = 900,
+) -> None:
+    moment = now or utc_now()
+    cursor = db.execute(
+        """
+        UPDATE analysis_attempts
+        SET heartbeat_at = ?, lease_expires_at = ?
+        WHERE id = ? AND claimant = ? AND state = 'running'
+        """,
+        (
+            iso(moment),
+            iso(moment + timedelta(seconds=lease_seconds)),
+            attempt_id,
+            claimant,
+        ),
+    )
+    if cursor.rowcount != 1:
+        db.rollback()
+        raise AutomationError("analysis lease is no longer owned by claimant")
+    db.commit()
+
+
+def record_analysis_output(
+    db: sqlite3.Connection,
+    *,
+    attempt_id: str,
+    output: Mapping[str, Any],
+    now: datetime | None = None,
+) -> None:
+    """Durably retain Codex output before parsing/persisting the proposal."""
+    stamp = iso(now or utc_now())
+    cursor = db.execute(
+        """
+        UPDATE analysis_attempts
+        SET state = 'output_received', output = ?, heartbeat_at = ?
+        WHERE id = ? AND state = 'running'
+        """,
+        (json.dumps(output, sort_keys=True), stamp, attempt_id),
+    )
+    if cursor.rowcount != 1:
+        db.rollback()
+        raise AutomationError("analysis attempt is not accepting output")
+    db.commit()
+
+
+def persist_proposal_result(
+    db: sqlite3.Connection,
+    *,
+    proposal_id: str,
+    attempt_id: str,
+    reviewed_head: str,
+    objective: str,
+    proposed_action: str,
+    summary: str,
+    structured_result: Mapping[str, Any],
+    findings: Sequence[Mapping[str, Any]],
+    delta_available: bool | None = None,
+    now: datetime | None = None,
+) -> None:
+    """Persist a proposal payload once; later edits belong to newer revisions."""
+    stamp = iso(now or utc_now())
+    try:
+        _begin_immediate(db)
+        row = db.execute(
+            """
+            SELECT p.head_sha, p.structured_result, p.state, a.state AS attempt_state
+            FROM proposal_revisions p
+            JOIN analysis_attempts a ON a.proposal_id = p.id
+            WHERE p.id = ? AND a.id = ?
+            """,
+            (proposal_id, attempt_id),
+        ).fetchone()
+        if row is None:
+            raise AutomationError("analysis attempt does not belong to proposal")
+        if row["structured_result"] is not None:
+            raise AutomationError("proposal result is already persisted")
+        if str(row["head_sha"]) != reviewed_head:
+            raise AutomationError("proposal output does not match its reviewed head")
+        if str(row["state"]) not in ACTIVE_PROPOSAL_STATES:
+            raise AutomationError("proposal was superseded before output persistence")
+        if str(row["attempt_state"]) not in {"output_received", "ready_to_persist"}:
+            raise AutomationError("analysis output is not ready to persist")
+        seen_candidates: set[str] = set()
+        for finding in findings:
+            candidate_id = str(finding.get("candidate_id") or "").strip()
+            if not candidate_id or candidate_id in seen_candidates:
+                raise AutomationError("candidate findings require unique candidate IDs")
+            seen_candidates.add(candidate_id)
+            db.execute(
+                """
+                INSERT INTO proposal_findings(
+                    proposal_id, candidate_id, category, severity, path, line,
+                    start_line, side, start_side, body, blocking, evidence,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    proposal_id,
+                    candidate_id,
+                    str(finding.get("category") or "other"),
+                    str(finding.get("severity") or "medium"),
+                    finding.get("path"),
+                    finding.get("line"),
+                    finding.get("start_line"),
+                    finding.get("side"),
+                    finding.get("start_side"),
+                    str(finding.get("body") or ""),
+                    int(bool(finding.get("blocking"))),
+                    json.dumps(finding.get("evidence"), sort_keys=True)
+                    if finding.get("evidence") is not None
+                    else None,
+                    stamp,
+                ),
+            )
+        db.execute(
+            """
+            UPDATE proposal_revisions
+            SET state = 'awaiting_decision', objective = ?, proposed_action = ?,
+                summary = ?, delta_available = ?, structured_result = ?, ready_at = ?
+            WHERE id = ?
+            """,
+            (
+                objective,
+                proposed_action,
+                summary,
+                int(delta_available) if delta_available is not None else None,
+                json.dumps(structured_result, sort_keys=True),
+                stamp,
+                proposal_id,
+            ),
+        )
+        db.execute(
+            """
+            UPDATE analysis_attempts
+            SET state = 'completed', completed_at = ?, lease_expires_at = NULL
+            WHERE id = ?
+            """,
+            (stamp, attempt_id),
+        )
+        db.execute(
+            """
+            UPDATE workflow_request_members
+            SET state = 'awaiting_decision', reviewed_head = ?, updated_at = ?
+            WHERE conversation_id = (
+                SELECT conversation_id FROM proposal_revisions WHERE id = ?
+            ) AND state NOT IN (
+                'approved', 'comments_published', 'skipped',
+                'merged_externally', 'closed_externally'
+            )
+            """,
+            (reviewed_head, stamp, proposal_id),
+        )
+        db.commit()
+    except sqlite3.IntegrityError as exc:
+        db.rollback()
+        raise AutomationError("proposal candidate findings conflict") from exc
+    except Exception:
+        db.rollback()
+        raise
+
+
+def record_proposal_decision(
+    db: sqlite3.Connection,
+    *,
+    conversation_id: str,
+    revision_token: str,
+    owner_user_id: str,
+    action: str,
+    idempotency_key: str,
+    selected_candidate_ids: Sequence[str] = (),
+    payload: Mapping[str, Any] | None = None,
+) -> tuple[str, bool]:
+    """Validate a revision-bound owner command and persist it exactly once."""
+    normalized_action = action.strip().lower()
+    if normalized_action not in {"approve", "publish", "skip", "edit", "dismiss"}:
+        raise AutomationError("unsupported proposal decision")
+    selected_json = json.dumps(list(selected_candidate_ids), sort_keys=True)
+    payload_json = json.dumps(dict(payload or {}), sort_keys=True)
+    try:
+        _begin_immediate(db)
+        existing = db.execute(
+            """
+            SELECT id, proposal_id, owner_user_id, action,
+                   selected_candidate_ids, payload
+            FROM proposal_decisions WHERE idempotency_key = ?
+            """,
+            (idempotency_key,),
+        ).fetchone()
+        if existing is not None:
+            proposal = db.execute(
+                "SELECT conversation_id, revision_token FROM proposal_revisions WHERE id = ?",
+                (existing["proposal_id"],),
+            ).fetchone()
+            matches = (
+                proposal is not None
+                and str(proposal["conversation_id"]) == conversation_id
+                and str(proposal["revision_token"]) == revision_token
+                and str(existing["owner_user_id"]) == owner_user_id
+                and str(existing["action"]) == normalized_action
+                and str(existing["selected_candidate_ids"]) == selected_json
+                and str(existing["payload"]) == payload_json
+            )
+            if not matches:
+                raise AutomationError("decision idempotency key has conflicting content")
+            db.commit()
+            return str(existing["id"]), False
+
+        proposal = validate_proposal_revision(
+            db,
+            conversation_id=conversation_id,
+            revision_token=revision_token,
+            owner_user_id=owner_user_id,
+        )
+        decision_id = str(uuid.uuid4())
+        stamp = iso(utc_now())
+        db.execute(
+            """
+            INSERT INTO proposal_decisions(
+                id, proposal_id, owner_user_id, action, selected_candidate_ids,
+                payload, idempotency_key, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                decision_id,
+                proposal["id"],
+                owner_user_id,
+                normalized_action,
+                selected_json,
+                payload_json,
+                idempotency_key,
+                stamp,
+            ),
+        )
+        if normalized_action in {"approve", "publish", "skip"}:
+            db.execute(
+                """
+                INSERT INTO workflow_actions(
+                    id, decision_id, action_type, expected_head, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    decision_id,
+                    normalized_action,
+                    proposal["head_sha"],
+                    stamp,
+                ),
+            )
+        db.commit()
+        return decision_id, True
+    except Exception:
+        db.rollback()
+        raise
+
+
+def claim_decision_action(
+    db: sqlite3.Connection,
+    *,
+    decision_id: str,
+    claimant: str,
+    now: datetime | None = None,
+    lease_seconds: int = 300,
+) -> tuple[str, str]:
+    """Claim the deterministic side effect authorized by a proposal decision."""
+    moment = now or utc_now()
+    stamp = iso(moment)
+    try:
+        _begin_immediate(db)
+        row = db.execute(
+            """
+            SELECT a.id, a.state, a.lease_expires_at, p.state AS proposal_state
+            FROM workflow_actions a
+            JOIN proposal_decisions d ON d.id = a.decision_id
+            JOIN proposal_revisions p ON p.id = d.proposal_id
+            WHERE a.decision_id = ?
+            """,
+            (decision_id,),
+        ).fetchone()
+        if row is None:
+            raise AutomationError("decision has no executable action")
+        action_id = str(row["id"])
+        state = str(row["state"])
+        if state in {"completed", "blocked", "failed"}:
+            db.commit()
+            return state, action_id
+        if str(row["proposal_state"]) not in ACTIVE_PROPOSAL_STATES:
+            raise AutomationError("proposal is no longer active")
+        if state == "executing" and str(row["lease_expires_at"] or "") > stamp:
+            db.commit()
+            return "in_progress", action_id
+        db.execute(
+            """
+            UPDATE workflow_actions
+            SET state = 'executing', claimant = ?, lease_expires_at = ?
+            WHERE id = ?
+            """,
+            (claimant, iso(moment + timedelta(seconds=lease_seconds)), action_id),
+        )
+        db.execute(
+            "UPDATE proposal_decisions SET state = 'executing' WHERE id = ?",
+            (decision_id,),
+        )
+        db.execute(
+            """
+            UPDATE proposal_revisions SET state = 'publishing'
+            WHERE id = (SELECT proposal_id FROM proposal_decisions WHERE id = ?)
+            """,
+            (decision_id,),
+        )
+        db.commit()
+        return "claimed", action_id
+    except Exception:
+        db.rollback()
+        raise
+
+
+def claim_slack_delivery(
+    db: sqlite3.Connection,
+    *,
+    delivery_key: str,
+    kind: str,
+    workspace_id: str,
+    channel_id: str,
+    thread_ts: str | None,
+    claimant: str,
+    now: datetime | None = None,
+    lease_seconds: int = 300,
+    request_id: str | None = None,
+    conversation_id: str | None = None,
+    proposal_id: str | None = None,
+    metadata_key: str | None = None,
+) -> tuple[str, str]:
+    """Claim a send-once Slack delivery using a stable workflow key."""
+    moment = now or utc_now()
+    stamp = iso(moment)
+    expires = iso(moment + timedelta(seconds=lease_seconds))
+    try:
+        _begin_immediate(db)
+        row = db.execute(
+            "SELECT * FROM slack_deliveries WHERE delivery_key = ?",
+            (delivery_key,),
+        ).fetchone()
+        if row is None:
+            delivery_id = str(uuid.uuid4())
+            db.execute(
+                """
+                INSERT INTO slack_deliveries(
+                    id, delivery_key, kind, workspace_id, channel_id, thread_ts,
+                    request_id, conversation_id, proposal_id, metadata_key,
+                    state, claimant, lease_expires_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'sending', ?, ?, ?, ?)
+                """,
+                (
+                    delivery_id,
+                    delivery_key,
+                    kind,
+                    workspace_id,
+                    channel_id,
+                    thread_ts,
+                    request_id,
+                    conversation_id,
+                    proposal_id,
+                    metadata_key,
+                    claimant,
+                    expires,
+                    stamp,
+                    stamp,
+                ),
+            )
+            db.commit()
+            return delivery_id, "claimed"
+
+        delivery_id = str(row["id"])
+        identity = (
+            str(row["kind"]),
+            str(row["workspace_id"]),
+            str(row["channel_id"]),
+            row["thread_ts"],
+        )
+        if identity != (kind, workspace_id, channel_id, thread_ts):
+            raise AutomationError("delivery key is bound to another destination")
+        state = str(row["state"])
+        if state == "sent":
+            db.commit()
+            return delivery_id, "sent"
+        if state == "blocked":
+            db.commit()
+            return delivery_id, "blocked"
+        if state == "sending" and str(row["lease_expires_at"] or "") > stamp:
+            db.commit()
+            return delivery_id, "in_progress"
+        db.execute(
+            """
+            UPDATE slack_deliveries
+            SET state = 'sending', claimant = ?, lease_expires_at = ?,
+                error = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (claimant, expires, stamp, delivery_id),
+        )
+        db.commit()
+        return delivery_id, "claimed"
+    except Exception:
+        db.rollback()
+        raise
+
+
+def complete_slack_delivery(
+    db: sqlite3.Connection,
+    *,
+    delivery_id: str,
+    claimant: str,
+    message_ts: str,
+    now: datetime | None = None,
+) -> None:
+    cursor = db.execute(
+        """
+        UPDATE slack_deliveries
+        SET state = 'sent', message_ts = ?, lease_expires_at = NULL,
+            updated_at = ?, error = NULL
+        WHERE id = ? AND claimant = ? AND state = 'sending'
+        """,
+        (message_ts, iso(now or utc_now()), delivery_id, claimant),
+    )
+    if cursor.rowcount != 1:
+        db.rollback()
+        raise AutomationError("Slack delivery is not owned by claimant")
+    db.commit()
+
+
+def block_slack_delivery(
+    db: sqlite3.Connection,
+    *,
+    delivery_id: str,
+    claimant: str,
+    error: str,
+    now: datetime | None = None,
+) -> None:
+    cursor = db.execute(
+        """
+        UPDATE slack_deliveries
+        SET state = 'blocked', error = ?, lease_expires_at = NULL, updated_at = ?
+        WHERE id = ? AND claimant = ? AND state = 'sending'
+        """,
+        (error, iso(now or utc_now()), delivery_id, claimant),
+    )
+    if cursor.rowcount != 1:
+        db.rollback()
+        raise AutomationError("Slack delivery is not owned by claimant")
+    db.commit()
+
+
+def schedule_proposal_reminder(
+    db: sqlite3.Connection,
+    proposal_id: str,
+    *,
+    due_at: datetime,
+) -> str:
+    """Create or reset the bounded reminder schedule for a proposal revision."""
+    stamp = iso(utc_now())
+    due = iso(due_at)
+    reminder_id = str(uuid.uuid4())
+    try:
+        _begin_immediate(db)
+        proposal = db.execute(
+            "SELECT state FROM proposal_revisions WHERE id = ?",
+            (proposal_id,),
+        ).fetchone()
+        if proposal is None or str(proposal["state"]) not in ACTIVE_PROPOSAL_STATES:
+            raise AutomationError("cannot schedule a reminder for an inactive proposal")
+        row = db.execute(
+            "SELECT id FROM proposal_reminders WHERE proposal_id = ?",
+            (proposal_id,),
+        ).fetchone()
+        if row is None:
+            db.execute(
+                """
+                INSERT INTO proposal_reminders(
+                    id, proposal_id, stage, state, due_at, created_at, updated_at
+                ) VALUES (?, ?, 1, 'scheduled', ?, ?, ?)
+                """,
+                (reminder_id, proposal_id, due, stamp, stamp),
+            )
+        else:
+            reminder_id = str(row["id"])
+            db.execute(
+                """
+                UPDATE proposal_reminders
+                SET stage = 1, state = 'scheduled', due_at = ?, claimant = NULL,
+                    lease_expires_at = NULL, delivery_id = NULL,
+                    last_sent_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (due, stamp, reminder_id),
+            )
+        db.commit()
+        return reminder_id
+    except Exception:
+        db.rollback()
+        raise
+
+
+def claim_due_reminders(
+    db: sqlite3.Connection,
+    *,
+    claimant: str,
+    now: datetime | None = None,
+    limit: int = 25,
+    lease_seconds: int = 300,
+) -> list[dict[str, Any]]:
+    """Claim due reminders in one write transaction for overlapping sweeps."""
+    if limit < 1:
+        return []
+    moment = now or utc_now()
+    stamp = iso(moment)
+    expires = iso(moment + timedelta(seconds=lease_seconds))
+    try:
+        _begin_immediate(db)
+        db.execute(
+            """
+            UPDATE proposal_reminders
+            SET state = 'scheduled', claimant = NULL, lease_expires_at = NULL,
+                updated_at = ?
+            WHERE state = 'claimed' AND lease_expires_at <= ?
+            """,
+            (stamp, stamp),
+        )
+        rows = db.execute(
+            """
+            SELECT r.*, p.conversation_id, p.revision_token, p.head_sha,
+                   c.workspace_id, c.owner_user_id, c.dm_channel_id, c.thread_ts,
+                   c.repo, c.pr_number
+            FROM proposal_reminders r
+            JOIN proposal_revisions p ON p.id = r.proposal_id
+            JOIN workflow_pr_conversations c ON c.id = p.conversation_id
+            WHERE r.state = 'scheduled' AND r.due_at <= ?
+              AND p.state IN ('queued', 'analyzing', 'output_pending',
+                              'awaiting_decision', 'publishing')
+            ORDER BY r.due_at, r.id
+            LIMIT ?
+            """,
+            (stamp, limit),
+        ).fetchall()
+        claimed: list[dict[str, Any]] = []
+        for row in rows:
+            db.execute(
+                """
+                UPDATE proposal_reminders
+                SET state = 'claimed', claimant = ?, lease_expires_at = ?,
+                    updated_at = ? WHERE id = ? AND state = 'scheduled'
+                """,
+                (claimant, expires, stamp, row["id"]),
+            )
+            claimed.append(_row_dict(row))
+        db.commit()
+        return claimed
+    except Exception:
+        db.rollback()
+        raise
+
+
+def complete_reminder_claim(
+    db: sqlite3.Connection,
+    *,
+    reminder_id: str,
+    claimant: str,
+    delivery_id: str,
+    next_due_at: datetime | None,
+    now: datetime | None = None,
+) -> None:
+    """Advance first reminder to second, then make it digest-only."""
+    moment = now or utc_now()
+    row = db.execute(
+        """
+        SELECT stage FROM proposal_reminders
+        WHERE id = ? AND claimant = ? AND state = 'claimed'
+        """,
+        (reminder_id, claimant),
+    ).fetchone()
+    if row is None:
+        raise AutomationError("reminder is not owned by claimant")
+    if next_due_at is None:
+        state = "digest_only"
+        due = None
+        stage = max(2, int(row["stage"]))
+    else:
+        state = "scheduled"
+        due = iso(next_due_at)
+        stage = int(row["stage"]) + 1
+    db.execute(
+        """
+        UPDATE proposal_reminders
+        SET stage = ?, state = ?, due_at = ?, claimant = NULL,
+            lease_expires_at = NULL, delivery_id = ?, last_sent_at = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            stage,
+            state,
+            due,
+            delivery_id,
+            iso(moment),
+            iso(moment),
+            reminder_id,
+        ),
+    )
+    db.commit()
+
+
+def reclaim_expired_analysis(
+    db: sqlite3.Connection,
+    *,
+    current_heads: Mapping[tuple[str, int], str],
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Recover expired work only after comparing its PR's current head."""
+    moment = now or utc_now()
+    stamp = iso(moment)
+    results: list[dict[str, Any]] = []
+    try:
+        _begin_immediate(db)
+        rows = db.execute(
+            """
+            SELECT a.*, p.conversation_id, p.revision_token, p.state AS proposal_state,
+                   p.head_sha, c.repo, c.pr_number
+            FROM analysis_attempts a
+            JOIN proposal_revisions p ON p.id = a.proposal_id
+            JOIN workflow_pr_conversations c ON c.id = p.conversation_id
+            WHERE a.state IN ('running', 'output_received')
+              AND a.lease_expires_at <= ?
+            ORDER BY c.repo, c.pr_number, a.started_at, a.id
+            """,
+            (stamp,),
+        ).fetchall()
+        for row in rows:
+            key = (str(row["repo"]), int(row["pr_number"]))
+            current_head = current_heads.get(key)
+            if not current_head:
+                continue
+            attempt_id = str(row["id"])
+            proposal_id = str(row["proposal_id"])
+            reviewed_head = str(row["head_sha"])
+            if current_head != reviewed_head:
+                db.execute(
+                    """
+                    UPDATE analysis_attempts
+                    SET state = 'abandoned_head_changed', completed_at = ?,
+                        lease_expires_at = NULL,
+                        error = 'PR head changed while analysis was leased'
+                    WHERE id = ?
+                    """,
+                    (stamp, attempt_id),
+                )
+                next_proposal = _create_proposal_revision_locked(
+                    db,
+                    str(row["conversation_id"]),
+                    head_sha=current_head,
+                    baseline_head_sha=reviewed_head,
+                    state="queued",
+                    now=moment,
+                )
+                results.append(
+                    {
+                        "attempt_id": attempt_id,
+                        "proposal_id": proposal_id,
+                        "outcome": "head_changed",
+                        "new_proposal_id": next_proposal["id"],
+                        "current_head": current_head,
+                    }
+                )
+            elif str(row["state"]) == "output_received":
+                db.execute(
+                    """
+                    UPDATE analysis_attempts
+                    SET state = 'ready_to_persist', lease_expires_at = NULL
+                    WHERE id = ?
+                    """,
+                    (attempt_id,),
+                )
+                db.execute(
+                    "UPDATE proposal_revisions SET state = 'output_pending' WHERE id = ?",
+                    (proposal_id,),
+                )
+                results.append(
+                    {
+                        "attempt_id": attempt_id,
+                        "proposal_id": proposal_id,
+                        "outcome": "persist_output",
+                    }
+                )
+            else:
+                db.execute(
+                    """
+                    UPDATE analysis_attempts
+                    SET state = 'expired', completed_at = ?, lease_expires_at = NULL,
+                        error = 'analysis lease expired before output'
+                    WHERE id = ?
+                    """,
+                    (stamp, attempt_id),
+                )
+                db.execute(
+                    "UPDATE proposal_revisions SET state = 'queued' WHERE id = ?",
+                    (proposal_id,),
+                )
+                results.append(
+                    {
+                        "attempt_id": attempt_id,
+                        "proposal_id": proposal_id,
+                        "outcome": "retry",
+                    }
+                )
+        db.commit()
+        return results
+    except Exception:
+        db.rollback()
+        raise
 
 
 def verified_run_exists(db: sqlite3.Connection, pr: PullRequest, login: str) -> bool:

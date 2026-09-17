@@ -5,7 +5,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -57,7 +57,7 @@ class ReviewAutomationTests(unittest.TestCase):
                     "SELECT MAX(version) FROM schema_migrations"
                 ).fetchone()[0]
 
-        self.assertEqual(version, 2)
+        self.assertEqual(version, 3)
         self.assertTrue(
             {
                 "cleanup_status",
@@ -67,6 +67,393 @@ class ReviewAutomationTests(unittest.TestCase):
             }
             <= columns
         )
+
+    def test_workflow_request_and_conversation_are_reused_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                request_id, request_created = automation.get_or_create_source_request(
+                    db,
+                    workspace_id="T1",
+                    channel_id="C1",
+                    message_ts="1720000000.000100",
+                    requester_user_id="U_REQUESTER",
+                )
+                conversation_id, conversation_created = (
+                    automation.get_or_create_pr_conversation(
+                        db,
+                        workspace_id="T1",
+                        owner_user_id="U_OWNER",
+                        repo="acme/api",
+                        pr_number=42,
+                        pr_url="https://github.com/acme/api/pull/42",
+                    )
+                )
+                automation.associate_request_conversation(
+                    db, request_id, conversation_id, position=0
+                )
+
+            with automation.connect_db(database) as db:
+                replayed_request_id, replayed_request_created = (
+                    automation.get_or_create_source_request(
+                        db,
+                        workspace_id="T1",
+                        channel_id="C1",
+                        message_ts="1720000000.000100",
+                        requester_user_id="U_REQUESTER",
+                    )
+                )
+                second_request_id, second_request_created = (
+                    automation.get_or_create_source_request(
+                        db,
+                        workspace_id="T1",
+                        channel_id="C1",
+                        message_ts="1720000100.000100",
+                        requester_user_id="U_REQUESTER",
+                    )
+                )
+                replayed_conversation_id, replayed_conversation_created = (
+                    automation.get_or_create_pr_conversation(
+                        db,
+                        workspace_id="T1",
+                        owner_user_id="U_OWNER",
+                        repo="acme/api",
+                        pr_number=42,
+                        pr_url="https://github.com/acme/api/pull/42",
+                    )
+                )
+                automation.associate_request_conversation(
+                    db, second_request_id, replayed_conversation_id, position=0
+                )
+                member_count = db.execute(
+                    "SELECT COUNT(*) FROM workflow_request_members "
+                    "WHERE conversation_id = ?",
+                    (conversation_id,),
+                ).fetchone()[0]
+
+        self.assertTrue(request_created)
+        self.assertTrue(conversation_created)
+        self.assertFalse(replayed_request_created)
+        self.assertFalse(replayed_conversation_created)
+        self.assertTrue(second_request_created)
+        self.assertEqual(replayed_request_id, request_id)
+        self.assertEqual(replayed_conversation_id, conversation_id)
+        self.assertNotEqual(second_request_id, request_id)
+        self.assertEqual(member_count, 2)
+
+    def test_linked_requests_and_projection_derive_one_shared_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                request_id, _ = automation.get_or_create_source_request(
+                    db,
+                    workspace_id="T1",
+                    channel_id="C1",
+                    message_ts="1720000000.000100",
+                    requester_user_id="U_REQUESTER",
+                )
+                conversations = []
+                for position, number in enumerate((41, 42)):
+                    conversation_id, _ = automation.get_or_create_pr_conversation(
+                        db,
+                        workspace_id="T1",
+                        owner_user_id="U_OWNER",
+                        repo="acme/api",
+                        pr_number=number,
+                        pr_url=f"https://github.com/acme/api/pull/{number}",
+                    )
+                    automation.associate_request_conversation(
+                        db, request_id, conversation_id, position=position
+                    )
+                    conversations.append(conversation_id)
+
+                linked = automation.source_requests_for_conversation(
+                    db, conversations[0]
+                )
+                automation.update_request_member_outcome(
+                    db,
+                    conversation_id=conversations[0],
+                    outcome="approved",
+                    reviewed_head="a" * 40,
+                )
+                pending_projection = automation.source_request_projection(db, request_id)
+                automation.update_request_member_outcome(
+                    db,
+                    conversation_id=conversations[1],
+                    outcome="comments_published",
+                    reviewed_head="b" * 40,
+                    published_comment_count=2,
+                )
+                complete_projection = automation.source_request_projection(
+                    db, request_id
+                )
+                automation.bind_source_verdict(
+                    db, request_id=request_id, verdict_message_ts="1720000200.000100"
+                )
+                bound_projection = automation.source_request_projection(db, request_id)
+
+        self.assertEqual([item["id"] for item in linked], [request_id])
+        self.assertEqual(pending_projection["reaction_name"], "eyes")
+        self.assertEqual(pending_projection["state"], "pending")
+        self.assertEqual(complete_projection["reaction_name"], "white_check_mark")
+        self.assertEqual(complete_projection["state"], "completed")
+        self.assertEqual(complete_projection["members"][1]["published_comment_count"], 2)
+        self.assertEqual(
+            bound_projection["verdict_message_ts"], "1720000200.000100"
+        )
+
+    def test_new_proposal_supersedes_old_revision_and_rejects_stale_decision(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, _ = automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T1",
+                    owner_user_id="U_OWNER",
+                    repo="acme/api",
+                    pr_number=42,
+                    pr_url="https://github.com/acme/api/pull/42",
+                )
+                first = automation.create_proposal_revision(
+                    db, conversation_id, head_sha="a" * 40
+                )
+                second = automation.create_proposal_revision(
+                    db,
+                    conversation_id,
+                    head_sha="b" * 40,
+                    baseline_head_sha="a" * 40,
+                )
+                first_state = db.execute(
+                    "SELECT state FROM proposal_revisions WHERE id = ?",
+                    (first["id"],),
+                ).fetchone()[0]
+
+                with self.assertRaisesRegex(
+                    automation.AutomationError, "superseded|not active"
+                ):
+                    automation.record_proposal_decision(
+                        db,
+                        conversation_id=conversation_id,
+                        revision_token=first["revision_token"],
+                        owner_user_id="U_OWNER",
+                        action="skip",
+                        idempotency_key="decision-old",
+                    )
+                decision_id, decision_created = automation.record_proposal_decision(
+                    db,
+                    conversation_id=conversation_id,
+                    revision_token=second["revision_token"],
+                    owner_user_id="U_OWNER",
+                    action="skip",
+                    idempotency_key="decision-current",
+                )
+                replayed_id, replayed_created = automation.record_proposal_decision(
+                    db,
+                    conversation_id=conversation_id,
+                    revision_token=second["revision_token"],
+                    owner_user_id="U_OWNER",
+                    action="skip",
+                    idempotency_key="decision-current",
+                )
+
+        self.assertEqual(first["revision_token"], "P1")
+        self.assertEqual(second["revision_token"], "P2")
+        self.assertEqual(first_state, "superseded")
+        self.assertTrue(decision_created)
+        self.assertFalse(replayed_created)
+        self.assertEqual(replayed_id, decision_id)
+
+    def test_proposal_result_persists_immutable_candidate_findings(self):
+        now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, _ = automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T1",
+                    owner_user_id="U_OWNER",
+                    repo="acme/api",
+                    pr_number=42,
+                    pr_url="https://github.com/acme/api/pull/42",
+                )
+                proposal = automation.create_proposal_revision(
+                    db, conversation_id, head_sha="a" * 40
+                )
+                _, attempt_id = automation.claim_analysis_attempt(
+                    db, proposal["id"], claimant="worker", now=now
+                )
+                automation.record_analysis_output(
+                    db,
+                    attempt_id=attempt_id,
+                    output={"summary": "One material issue"},
+                    now=now,
+                )
+                automation.persist_proposal_result(
+                    db,
+                    proposal_id=proposal["id"],
+                    attempt_id=attempt_id,
+                    reviewed_head="a" * 40,
+                    objective="Protect persisted prices",
+                    proposed_action="publish",
+                    summary="One material issue",
+                    structured_result={"published": False},
+                    findings=[
+                        {
+                            "candidate_id": "C1",
+                            "category": "correctness",
+                            "severity": "high",
+                            "path": "price.py",
+                            "line": 42,
+                            "body": "This can overwrite a persisted price.",
+                            "blocking": True,
+                        }
+                    ],
+                    now=now,
+                )
+                finding = db.execute(
+                    "SELECT candidate_id, body FROM proposal_findings "
+                    "WHERE proposal_id = ?",
+                    (proposal["id"],),
+                ).fetchone()
+                with self.assertRaisesRegex(
+                    automation.AutomationError, "already persisted"
+                ):
+                    automation.persist_proposal_result(
+                        db,
+                        proposal_id=proposal["id"],
+                        attempt_id=attempt_id,
+                        reviewed_head="a" * 40,
+                        objective="Changed objective",
+                        proposed_action="approve",
+                        summary="Changed",
+                        structured_result={},
+                        findings=[],
+                        now=now,
+                    )
+
+        self.assertEqual(finding["candidate_id"], "C1")
+        self.assertEqual(finding["body"], "This can overwrite a persisted price.")
+
+    def test_delivery_and_reminder_claims_have_one_owner(self):
+        now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, _ = automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T1",
+                    owner_user_id="U_OWNER",
+                    repo="acme/api",
+                    pr_number=42,
+                    pr_url="https://github.com/acme/api/pull/42",
+                )
+                proposal = automation.create_proposal_revision(
+                    db, conversation_id, head_sha="a" * 40
+                )
+                automation.schedule_proposal_reminder(
+                    db, proposal["id"], due_at=now - timedelta(minutes=1)
+                )
+                delivery_id, delivery_state = automation.claim_slack_delivery(
+                    db,
+                    delivery_key="proposal:42:P1",
+                    kind="proposal_summary",
+                    workspace_id="T1",
+                    channel_id="D1",
+                    thread_ts=None,
+                    claimant="worker-1",
+                    now=now,
+                )
+                replayed_delivery_id, replayed_delivery_state = (
+                    automation.claim_slack_delivery(
+                        db,
+                        delivery_key="proposal:42:P1",
+                        kind="proposal_summary",
+                        workspace_id="T1",
+                        channel_id="D1",
+                        thread_ts=None,
+                        claimant="worker-2",
+                        now=now,
+                    )
+                )
+                first_claim = automation.claim_due_reminders(
+                    db, claimant="worker-1", now=now, limit=10
+                )
+                second_claim = automation.claim_due_reminders(
+                    db, claimant="worker-2", now=now, limit=10
+                )
+
+        self.assertEqual(delivery_state, "claimed")
+        self.assertEqual(replayed_delivery_state, "in_progress")
+        self.assertEqual(replayed_delivery_id, delivery_id)
+        self.assertEqual(len(first_claim), 1)
+        self.assertEqual(first_claim[0]["proposal_id"], proposal["id"])
+        self.assertEqual(second_claim, [])
+
+    def test_expired_analysis_reclaims_retry_output_and_head_drift(self):
+        now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversations = []
+                proposals = []
+                for number, head in ((1, "a" * 40), (2, "b" * 40), (3, "c" * 40)):
+                    conversation_id, _ = automation.get_or_create_pr_conversation(
+                        db,
+                        workspace_id="T1",
+                        owner_user_id="U_OWNER",
+                        repo="acme/api",
+                        pr_number=number,
+                        pr_url=f"https://github.com/acme/api/pull/{number}",
+                    )
+                    proposal = automation.create_proposal_revision(
+                        db, conversation_id, head_sha=head
+                    )
+                    state, attempt_id = automation.claim_analysis_attempt(
+                        db,
+                        proposal["id"],
+                        claimant="worker",
+                        now=now - timedelta(minutes=10),
+                        lease_seconds=60,
+                    )
+                    self.assertEqual(state, "claimed")
+                    conversations.append(conversation_id)
+                    proposals.append((proposal, attempt_id))
+
+                automation.record_analysis_output(
+                    db,
+                    attempt_id=proposals[1][1],
+                    output={"summary": "complete but not persisted"},
+                    now=now - timedelta(minutes=8),
+                )
+                reclaimed = automation.reclaim_expired_analysis(
+                    db,
+                    current_heads={
+                        ("acme/api", 1): "a" * 40,
+                        ("acme/api", 2): "b" * 40,
+                        ("acme/api", 3): "d" * 40,
+                    },
+                    now=now,
+                )
+                third_state = db.execute(
+                    "SELECT state FROM proposal_revisions WHERE id = ?",
+                    (proposals[2][0]["id"],),
+                ).fetchone()[0]
+                latest_third = db.execute(
+                    "SELECT revision_token, head_sha, baseline_head_sha, state "
+                    "FROM proposal_revisions WHERE conversation_id = ? "
+                    "ORDER BY revision_number DESC LIMIT 1",
+                    (conversations[2],),
+                ).fetchone()
+
+        self.assertEqual(
+            [item["outcome"] for item in reclaimed],
+            ["retry", "persist_output", "head_changed"],
+        )
+        self.assertEqual(third_state, "superseded")
+        self.assertEqual(latest_third["revision_token"], "P2")
+        self.assertEqual(latest_third["head_sha"], "d" * 40)
+        self.assertEqual(latest_third["baseline_head_sha"], "c" * 40)
+        self.assertEqual(latest_third["state"], "queued")
 
     def test_exact_pr_urls_and_repository_allowlist_are_enforced(self):
         with patch.dict(
