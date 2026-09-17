@@ -10,6 +10,15 @@
       "skills": ["review-digest"],
       "deliver": "slack:${SLACK_REVIEW_DIGEST_USER_ID}",
       "workdir": "${REVIEW_MONOREPO_ROOT}"
+    },
+    {
+      "key": "pr-review-reminders",
+      "name": "Private PR review reminders",
+      "schedule": "*/15 * * * *",
+      "prompt": "Use the review-reminder skill to deliver due private PR review reminders to their persisted Slack DM threads. The skill must acknowledge every send and return exactly NO_REPLY.",
+      "skills": ["review-reminder"],
+      "deliver": "slack:${SLACK_REVIEW_DIGEST_USER_ID}",
+      "workdir": "${REVIEW_MONOREPO_ROOT}"
     }
   ]
 }

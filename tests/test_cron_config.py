@@ -29,6 +29,9 @@ class CronConfigTests(unittest.TestCase):
         self.assertEqual(config["jobs"][0]["schedule"], "0 17 * * *")
         self.assertEqual(config["jobs"][0]["deliver"], "slack:U_OWNER")
         self.assertEqual(config["jobs"][0]["skills"], ["review-digest"])
+        reminder = next(job for job in config["jobs"] if job["key"] == "pr-review-reminders")
+        self.assertEqual(reminder["schedule"], "*/15 * * * *")
+        self.assertEqual(reminder["skills"], ["review-reminder"])
 
     def test_ambiguous_owner_requires_explicit_digest_recipient(self):
         with self.assertRaises(sync_crons.CronConfigError):

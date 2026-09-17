@@ -97,6 +97,53 @@ def iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
+def _weekday_start(value: datetime, zone: ZoneInfo, *, strictly_next: bool) -> datetime:
+    local = value.astimezone(zone)
+    candidate = local.date() + timedelta(days=1 if strictly_next else 0)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return datetime(
+        candidate.year,
+        candidate.month,
+        candidate.day,
+        9,
+        tzinfo=zone,
+    )
+
+
+def next_weekday_start(value: datetime, timezone_name: str) -> datetime:
+    """Return 09:00 on the next Monday-Friday in the configured timezone."""
+    return _weekday_start(value, ZoneInfo(timezone_name), strictly_next=True)
+
+
+def add_working_minutes(
+    value: datetime,
+    minutes: int,
+    timezone_name: str,
+) -> datetime:
+    """Add Monday-Friday 09:00-18:00 working minutes (no holiday calendar)."""
+    if minutes < 0:
+        raise AutomationError("working minutes cannot be negative")
+    zone = ZoneInfo(timezone_name)
+    cursor = value.astimezone(zone)
+    remaining = minutes
+    while True:
+        if cursor.weekday() >= 5:
+            cursor = _weekday_start(cursor, zone, strictly_next=False)
+        day_start = cursor.replace(hour=9, minute=0, second=0, microsecond=0)
+        day_end = cursor.replace(hour=18, minute=0, second=0, microsecond=0)
+        if cursor < day_start:
+            cursor = day_start
+        elif cursor >= day_end:
+            cursor = _weekday_start(cursor, zone, strictly_next=True)
+            continue
+        available = int((day_end - cursor).total_seconds() // 60)
+        if remaining <= available:
+            return cursor + timedelta(minutes=remaining)
+        remaining -= available
+        cursor = _weekday_start(cursor, zone, strictly_next=True)
+
+
 def emit(payload: Any) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -1063,6 +1110,18 @@ def _create_proposal_revision_locked(
     )
     db.execute(
         """
+        UPDATE proposal_reminders
+        SET state = 'completed', due_at = NULL, claimant = NULL,
+            lease_expires_at = NULL, updated_at = ?
+        WHERE proposal_id IN (
+            SELECT id FROM proposal_revisions
+            WHERE conversation_id = ? AND state = 'superseded'
+        ) AND state NOT IN ('completed', 'digest_only')
+        """,
+        (stamp, conversation_id),
+    )
+    db.execute(
+        """
         UPDATE proposal_decisions
         SET state = 'rejected_stale', completed_at = ?,
             error = 'proposal superseded by a newer revision'
@@ -1477,7 +1536,8 @@ def persist_proposal_result(
     now: datetime | None = None,
 ) -> None:
     """Persist a proposal payload once; later edits belong to newer revisions."""
-    stamp = iso(now or utc_now())
+    moment = now or utc_now()
+    stamp = iso(moment)
     try:
         _begin_immediate(db)
         row = db.execute(
@@ -1568,6 +1628,12 @@ def persist_proposal_result(
             )
             """,
             (reviewed_head, stamp, proposal_id),
+        )
+        _schedule_ready_reminder_locked(
+            db,
+            proposal_id,
+            ready_at=moment,
+            timezone_name=os.environ.get("TZ", "America/Mexico_City"),
         )
         db.commit()
     except sqlite3.IntegrityError as exc:
@@ -1874,9 +1940,10 @@ def schedule_proposal_reminder(
     proposal_id: str,
     *,
     due_at: datetime,
+    now: datetime | None = None,
 ) -> str:
     """Create or reset the bounded reminder schedule for a proposal revision."""
-    stamp = iso(utc_now())
+    stamp = iso(now or utc_now())
     due = iso(due_at)
     reminder_id = str(uuid.uuid4())
     try:
@@ -1919,6 +1986,38 @@ def schedule_proposal_reminder(
         raise
 
 
+def _schedule_ready_reminder_locked(
+    db: sqlite3.Connection,
+    proposal_id: str,
+    *,
+    ready_at: datetime,
+    timezone_name: str,
+) -> str:
+    """Insert the first bounded reminder while the proposal transaction is open."""
+    stamp = iso(ready_at)
+    due = iso(add_working_minutes(ready_at, 120, timezone_name))
+    reminder_id = str(uuid.uuid4())
+    db.execute(
+        """
+        INSERT INTO proposal_reminders(
+            id, proposal_id, stage, state, due_at, created_at, updated_at
+        ) VALUES (?, ?, 1, 'scheduled', ?, ?, ?)
+        ON CONFLICT(proposal_id) DO UPDATE SET
+            stage = 1, state = 'scheduled', due_at = excluded.due_at,
+            claimant = NULL, lease_expires_at = NULL, delivery_id = NULL,
+            last_sent_at = NULL, updated_at = excluded.updated_at
+        """,
+        (reminder_id, proposal_id, due, stamp, stamp),
+    )
+    row = db.execute(
+        "SELECT id FROM proposal_reminders WHERE proposal_id = ?",
+        (proposal_id,),
+    ).fetchone()
+    if row is None:
+        raise AutomationError("failed to schedule proposal reminder")
+    return str(row["id"])
+
+
 def claim_due_reminders(
     db: sqlite3.Connection,
     *,
@@ -1948,13 +2047,12 @@ def claim_due_reminders(
             """
             SELECT r.*, p.conversation_id, p.revision_token, p.head_sha,
                    c.workspace_id, c.owner_user_id, c.dm_channel_id, c.thread_ts,
-                   c.repo, c.pr_number
+                   c.repo, c.pr_number, c.pr_url
             FROM proposal_reminders r
             JOIN proposal_revisions p ON p.id = r.proposal_id
             JOIN workflow_pr_conversations c ON c.id = p.conversation_id
             WHERE r.state = 'scheduled' AND r.due_at <= ?
-              AND p.state IN ('queued', 'analyzing', 'output_pending',
-                              'awaiting_decision', 'publishing')
+              AND p.state = 'awaiting_decision'
             ORDER BY r.due_at, r.id
             LIMIT ?
             """,
@@ -1962,7 +2060,7 @@ def claim_due_reminders(
         ).fetchall()
         claimed: list[dict[str, Any]] = []
         for row in rows:
-            db.execute(
+            cursor = db.execute(
                 """
                 UPDATE proposal_reminders
                 SET state = 'claimed', claimant = ?, lease_expires_at = ?,
@@ -1970,7 +2068,8 @@ def claim_due_reminders(
                 """,
                 (claimant, expires, stamp, row["id"]),
             )
-            claimed.append(_row_dict(row))
+            if cursor.rowcount == 1:
+                claimed.append(_row_dict(row))
         db.commit()
         return claimed
     except Exception:
@@ -2025,6 +2124,419 @@ def complete_reminder_claim(
         ),
     )
     db.commit()
+
+
+def _release_reminder_claim(
+    db: sqlite3.Connection,
+    *,
+    reminder_id: str,
+    claimant: str,
+    now: datetime,
+) -> None:
+    db.execute(
+        """
+        UPDATE proposal_reminders
+        SET state = 'scheduled', claimant = NULL, lease_expires_at = NULL,
+            updated_at = ?
+        WHERE id = ? AND claimant = ? AND state = 'claimed'
+        """,
+        (iso(now), reminder_id, claimant),
+    )
+    db.commit()
+
+
+def _block_claimed_reminder(
+    db: sqlite3.Connection,
+    *,
+    reminder_id: str,
+    claimant: str,
+    now: datetime,
+) -> None:
+    db.execute(
+        """
+        UPDATE proposal_reminders
+        SET state = 'blocked', due_at = NULL, claimant = NULL,
+            lease_expires_at = NULL, updated_at = ?
+        WHERE id = ? AND claimant = ? AND state = 'claimed'
+        """,
+        (iso(now), reminder_id, claimant),
+    )
+    db.commit()
+
+
+def _prepare_reminder_delivery(
+    db: sqlite3.Connection,
+    *,
+    reminder_id: str,
+    claimant: str,
+    now: datetime,
+    lease_seconds: int,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Bind one claimed reminder to one exact send; never replay ambiguity."""
+    stamp = iso(now)
+    expires = iso(now + timedelta(seconds=lease_seconds))
+    try:
+        _begin_immediate(db)
+        row = db.execute(
+            """
+            SELECT r.*, p.conversation_id, p.revision_token, p.head_sha, p.summary,
+                   c.workspace_id, c.dm_channel_id, c.thread_ts,
+                   c.repo, c.pr_number, c.pr_url
+            FROM proposal_reminders r
+            JOIN proposal_revisions p ON p.id = r.proposal_id
+            JOIN workflow_pr_conversations c ON c.id = p.conversation_id
+            WHERE r.id = ? AND r.claimant = ? AND r.state = 'claimed'
+              AND p.state = 'awaiting_decision'
+            """,
+            (reminder_id, claimant),
+        ).fetchone()
+        if row is None:
+            db.commit()
+            return None, "reminder is no longer awaiting a decision"
+        if not row["dm_channel_id"] or not row["thread_ts"]:
+            db.execute(
+                """
+                UPDATE proposal_reminders
+                SET state = 'blocked', due_at = NULL, claimant = NULL,
+                    lease_expires_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (stamp, reminder_id),
+            )
+            db.commit()
+            return None, "persisted DM channel/thread route is missing"
+
+        stage = int(row["stage"])
+        delivery_key = f"review-reminder:{row['proposal_id']}:{stage}"
+        delivery = db.execute(
+            "SELECT * FROM slack_deliveries WHERE delivery_key = ?",
+            (delivery_key,),
+        ).fetchone()
+        if delivery is not None:
+            # A send was previously handed to Slack without an acknowledgement.
+            # Reposting could duplicate it, so require operator reconciliation.
+            db.execute(
+                """
+                UPDATE slack_deliveries
+                SET state = 'blocked', lease_expires_at = NULL,
+                    error = 'ambiguous prior reminder send; reconcile before retry',
+                    updated_at = ?
+                WHERE id = ? AND state != 'sent'
+                """,
+                (stamp, delivery["id"]),
+            )
+            db.execute(
+                """
+                UPDATE proposal_reminders
+                SET state = 'blocked', due_at = NULL, claimant = NULL,
+                    lease_expires_at = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (stamp, reminder_id),
+            )
+            db.commit()
+            return None, "ambiguous prior reminder send"
+
+        delivery_id = str(uuid.uuid4())
+        db.execute(
+            """
+            INSERT INTO slack_deliveries(
+                id, delivery_key, kind, workspace_id, channel_id, thread_ts,
+                conversation_id, proposal_id, metadata_key, state, claimant,
+                lease_expires_at, created_at, updated_at
+            ) VALUES (?, ?, 'review_reminder', ?, ?, ?, ?, ?, ?, 'sending',
+                      ?, ?, ?, ?)
+            """,
+            (
+                delivery_id,
+                delivery_key,
+                row["workspace_id"],
+                row["dm_channel_id"],
+                row["thread_ts"],
+                row["conversation_id"],
+                row["proposal_id"],
+                delivery_key,
+                claimant,
+                expires,
+                stamp,
+                stamp,
+            ),
+        )
+        db.execute(
+            "UPDATE proposal_reminders SET delivery_id = ?, updated_at = ? WHERE id = ?",
+            (delivery_id, stamp, reminder_id),
+        )
+        prefix = "Reminder" if stage == 1 else "Final private reminder"
+        suffix = (
+            ""
+            if stage == 1
+            else " After this reminder, the proposal will appear only in the daily digest."
+        )
+        text = (
+            f"{prefix}: {row['repo']}#{row['pr_number']} proposal "
+            f"{row['revision_token']} is awaiting your decision.{suffix} "
+            f"Reply in this thread with `approve {row['revision_token']}`, "
+            f"`publish {row['revision_token']} <candidate IDs>`, or "
+            f"`skip {row['revision_token']}`."
+        )
+        item = {
+            "reminder_id": reminder_id,
+            "delivery_id": delivery_id,
+            "proposal_id": str(row["proposal_id"]),
+            "revision_token": str(row["revision_token"]),
+            "stage": stage,
+            "workspace_id": str(row["workspace_id"]),
+            "channel_id": str(row["dm_channel_id"]),
+            "thread_ts": str(row["thread_ts"]),
+            "repo": str(row["repo"]),
+            "pr_number": int(row["pr_number"]),
+            "pr_url": str(row["pr_url"]),
+            "text": text,
+        }
+        db.commit()
+        return item, None
+    except Exception:
+        db.rollback()
+        raise
+
+
+def ack_reminder_delivery(
+    db_path: str | None,
+    *,
+    reminder_id: str,
+    delivery_id: str,
+    claimant: str,
+    message_ts: str,
+    timezone_name: str = "America/Mexico_City",
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Atomically record Slack's receipt and advance the bounded schedule."""
+    moment = now or utc_now()
+    stamp = iso(moment)
+    with connect_db(db_path) as db:
+        try:
+            _begin_immediate(db)
+            row = db.execute(
+                """
+                SELECT r.stage, r.proposal_id
+                FROM proposal_reminders r
+                JOIN slack_deliveries d ON d.id = r.delivery_id
+                WHERE r.id = ? AND r.delivery_id = ? AND r.claimant = ?
+                  AND r.state = 'claimed' AND d.state = 'sending'
+                  AND d.claimant = ?
+                """,
+                (reminder_id, delivery_id, claimant, claimant),
+            ).fetchone()
+            if row is None:
+                raise AutomationError("reminder delivery is not owned by claimant")
+            stage = int(row["stage"])
+            if stage == 1:
+                next_stage = 2
+                state = "scheduled"
+                due = iso(next_weekday_start(moment, timezone_name))
+            else:
+                next_stage = max(2, stage)
+                state = "digest_only"
+                due = None
+            db.execute(
+                """
+                UPDATE slack_deliveries
+                SET state = 'sent', message_ts = ?, lease_expires_at = NULL,
+                    error = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (message_ts, stamp, delivery_id),
+            )
+            db.execute(
+                """
+                UPDATE proposal_reminders
+                SET stage = ?, state = ?, due_at = ?, claimant = NULL,
+                    lease_expires_at = NULL, last_sent_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (next_stage, state, due, stamp, stamp, reminder_id),
+            )
+            db.commit()
+            return {
+                "status": "acknowledged",
+                "reminder_id": reminder_id,
+                "delivery_id": delivery_id,
+                "proposal_id": str(row["proposal_id"]),
+                "stage": next_stage,
+                "state": state,
+                "due_at": due,
+            }
+        except Exception:
+            db.rollback()
+            raise
+
+
+def block_reminder_delivery(
+    db_path: str | None,
+    *,
+    reminder_id: str,
+    delivery_id: str,
+    claimant: str,
+    error: str,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Persist a definitive Slack send failure without scheduling another nudge."""
+    stamp = iso(now or utc_now())
+    with connect_db(db_path) as db:
+        try:
+            _begin_immediate(db)
+            delivery = db.execute(
+                """
+                SELECT d.id FROM slack_deliveries d
+                JOIN proposal_reminders r ON r.delivery_id = d.id
+                WHERE r.id = ? AND d.id = ? AND r.claimant = ?
+                  AND r.state = 'claimed' AND d.claimant = ?
+                  AND d.state = 'sending'
+                """,
+                (reminder_id, delivery_id, claimant, claimant),
+            ).fetchone()
+            if delivery is None:
+                raise AutomationError("reminder delivery is not owned by claimant")
+            db.execute(
+                """
+                UPDATE slack_deliveries
+                SET state = 'blocked', error = ?, lease_expires_at = NULL,
+                    updated_at = ? WHERE id = ?
+                """,
+                (error[:4000], stamp, delivery_id),
+            )
+            db.execute(
+                """
+                UPDATE proposal_reminders
+                SET state = 'blocked', due_at = NULL, claimant = NULL,
+                    lease_expires_at = NULL, updated_at = ? WHERE id = ?
+                """,
+                (stamp, reminder_id),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+    return {"status": "blocked", "reminder_id": reminder_id, "delivery_id": delivery_id}
+
+
+def _reclaim_expired_analysis_live(
+    db: sqlite3.Connection,
+    *,
+    now: datetime,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    rows = db.execute(
+        """
+        SELECT DISTINCT c.repo, c.pr_number, c.pr_url, c.id AS conversation_id
+        FROM analysis_attempts a
+        JOIN proposal_revisions p ON p.id = a.proposal_id
+        JOIN workflow_pr_conversations c ON c.id = p.conversation_id
+        WHERE a.state IN ('running', 'output_received')
+          AND a.lease_expires_at <= ?
+        ORDER BY c.repo, c.pr_number
+        """,
+        (iso(now),),
+    ).fetchall()
+    current_heads: dict[tuple[str, int], str] = {}
+    errors: list[dict[str, str]] = []
+    for row in rows:
+        try:
+            pr = load_pr(str(row["pr_url"]))
+            if pr.state in {"MERGED", "CLOSED"}:
+                finalize_external_pr(
+                    db, conversation_id=str(row["conversation_id"]), pr=pr
+                )
+            else:
+                current_heads[(str(row["repo"]), int(row["pr_number"]))] = pr.head_sha
+        except (AutomationError, OSError, subprocess.TimeoutExpired) as exc:
+            errors.append({"pr_url": str(row["pr_url"]), "error": str(exc)})
+    reclaimed = reclaim_expired_analysis(db, current_heads=current_heads, now=now)
+    return reclaimed, errors
+
+
+def reminder_sweep(
+    db_path: str | None = None,
+    *,
+    claimant: str,
+    timezone_name: str = "America/Mexico_City",
+    now: datetime | None = None,
+    limit: int = 25,
+    lease_seconds: int = 300,
+) -> dict[str, Any]:
+    """Claim due private reminders and emit exact persisted Slack delivery work."""
+    moment = now or utc_now()
+    deliveries: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    lifecycle: list[dict[str, Any]] = []
+    with connect_db(db_path) as db:
+        reclaimed, reclaim_errors = _reclaim_expired_analysis_live(db, now=moment)
+        errors.extend(reclaim_errors)
+        claims = claim_due_reminders(
+            db,
+            claimant=claimant,
+            now=moment,
+            limit=limit,
+            lease_seconds=lease_seconds,
+        )
+        for claim in claims:
+            reminder_id = str(claim["id"])
+            try:
+                pr = load_pr(str(claim["pr_url"]))
+            except (AutomationError, OSError, subprocess.TimeoutExpired) as exc:
+                _release_reminder_claim(
+                    db, reminder_id=reminder_id, claimant=claimant, now=moment
+                )
+                errors.append({"pr_url": str(claim["pr_url"]), "error": str(exc)})
+                continue
+            if pr.state in {"MERGED", "CLOSED"}:
+                lifecycle.append(
+                    finalize_external_pr(
+                        db,
+                        conversation_id=str(claim["conversation_id"]),
+                        pr=pr,
+                    )
+                )
+                continue
+            if pr.head_sha != str(claim["head_sha"]):
+                _block_claimed_reminder(
+                    db, reminder_id=reminder_id, claimant=claimant, now=moment
+                )
+                try:
+                    lifecycle.append(
+                        re_review_current_head(
+                            db,
+                            conversation_id=str(claim["conversation_id"]),
+                            pr=pr,
+                            login=reviewer_login(),
+                            claimant=f"{claimant}:re-review",
+                        )
+                    )
+                except (AutomationError, OSError, subprocess.TimeoutExpired) as exc:
+                    errors.append({"pr_url": pr.url, "error": str(exc)})
+                continue
+            item, reason = _prepare_reminder_delivery(
+                db,
+                reminder_id=reminder_id,
+                claimant=claimant,
+                now=moment,
+                lease_seconds=lease_seconds,
+            )
+            if item is not None:
+                deliveries.append(item)
+            else:
+                blocked.append({"reminder_id": reminder_id, "reason": reason})
+    return {
+        "status": "ready",
+        "claimant": claimant,
+        "deliveries": deliveries,
+        "delivery_count": len(deliveries),
+        "blocked": blocked,
+        "blocked_count": len(blocked),
+        "reclaimed_analysis": reclaimed,
+        "lifecycle": lifecycle,
+        "errors": errors,
+    }
 
 
 def reclaim_expired_analysis(
@@ -4167,12 +4679,41 @@ def digest_source(
                     },
                 }
             )
+        pending_rows = db.execute(
+            """
+            SELECT p.id AS proposal_id, p.revision_token, p.head_sha,
+                   p.objective, p.summary, p.ready_at, r.last_sent_at,
+                   c.repo, c.pr_number, c.pr_url
+            FROM proposal_reminders r
+            JOIN proposal_revisions p ON p.id = r.proposal_id
+            JOIN workflow_pr_conversations c ON c.id = p.conversation_id
+            WHERE r.state = 'digest_only' AND p.state = 'awaiting_decision'
+            ORDER BY r.last_sent_at, c.repo, c.pr_number
+            """
+        ).fetchall()
+        pending_reviews = [
+            {
+                "proposal_id": str(row["proposal_id"]),
+                "revision_token": str(row["revision_token"]),
+                "repo": str(row["repo"]),
+                "pr_number": int(row["pr_number"]),
+                "pr_url": str(row["pr_url"]),
+                "head_sha": str(row["head_sha"]),
+                "objective": row["objective"],
+                "summary": row["summary"],
+                "ready_at": row["ready_at"],
+                "last_reminded_at": row["last_sent_at"],
+            }
+            for row in pending_rows
+        ]
     return {
         "timezone": timezone_name,
         "window_start": start.isoformat(timespec="seconds"),
         "window_end": end.isoformat(timespec="seconds"),
         "review_count": len(reviews),
         "reviews": reviews,
+        "pending_review_count": len(pending_reviews),
+        "pending_reviews": pending_reviews,
     }
 
 
@@ -4230,6 +4771,33 @@ def build_parser() -> argparse.ArgumentParser:
     digest = subparsers.add_parser("digest-source", help="emit verified review data for a digest")
     digest.add_argument("--hours", type=int, default=24)
     digest.add_argument("--timezone", default=os.environ.get("TZ", "America/Mexico_City"))
+    reminders = subparsers.add_parser(
+        "reminder-sweep",
+        help="claim due private reminders and emit exact Slack thread deliveries",
+    )
+    reminders.add_argument("--claimant", default=f"reminder-{uuid.uuid4()}")
+    reminders.add_argument("--limit", type=int, default=25)
+    reminders.add_argument("--lease-seconds", type=int, default=300)
+    reminders.add_argument(
+        "--timezone", default=os.environ.get("TZ", "America/Mexico_City")
+    )
+    reminder_ack = subparsers.add_parser(
+        "reminder-ack", help="acknowledge one persisted Slack reminder receipt"
+    )
+    reminder_ack.add_argument("--reminder-id", required=True)
+    reminder_ack.add_argument("--delivery-id", required=True)
+    reminder_ack.add_argument("--claimant", required=True)
+    reminder_ack.add_argument("--message-ts", required=True)
+    reminder_ack.add_argument(
+        "--timezone", default=os.environ.get("TZ", "America/Mexico_City")
+    )
+    reminder_block = subparsers.add_parser(
+        "reminder-block", help="record one definitive Slack reminder failure"
+    )
+    reminder_block.add_argument("--reminder-id", required=True)
+    reminder_block.add_argument("--delivery-id", required=True)
+    reminder_block.add_argument("--claimant", required=True)
+    reminder_block.add_argument("--error", required=True)
     return parser
 
 
@@ -4287,6 +4855,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "digest-source":
             emit(digest_source(args.db, hours=args.hours, timezone_name=args.timezone))
+        elif args.command == "reminder-sweep":
+            emit(
+                reminder_sweep(
+                    args.db,
+                    claimant=args.claimant,
+                    timezone_name=args.timezone,
+                    limit=args.limit,
+                    lease_seconds=args.lease_seconds,
+                )
+            )
+        elif args.command == "reminder-ack":
+            emit(
+                ack_reminder_delivery(
+                    args.db,
+                    reminder_id=args.reminder_id,
+                    delivery_id=args.delivery_id,
+                    claimant=args.claimant,
+                    message_ts=args.message_ts,
+                    timezone_name=args.timezone,
+                )
+            )
+        elif args.command == "reminder-block":
+            emit(
+                block_reminder_delivery(
+                    args.db,
+                    reminder_id=args.reminder_id,
+                    delivery_id=args.delivery_id,
+                    claimant=args.claimant,
+                    error=args.error,
+                )
+            )
         return 0
     except (AutomationError, OSError, sqlite3.Error, subprocess.TimeoutExpired) as exc:
         emit({"status": "error", "error": str(exc)})

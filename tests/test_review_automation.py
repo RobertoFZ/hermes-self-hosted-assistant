@@ -1168,7 +1168,10 @@ class ReviewAutomationTests(unittest.TestCase):
                     pr_url="https://github.com/acme/api/pull/42",
                 )
                 proposal = automation.create_proposal_revision(
-                    db, conversation_id, head_sha="a" * 40
+                    db,
+                    conversation_id,
+                    head_sha="a" * 40,
+                    state="awaiting_decision",
                 )
                 automation.schedule_proposal_reminder(
                     db, proposal["id"], due_at=now - timedelta(minutes=1)
@@ -1208,6 +1211,199 @@ class ReviewAutomationTests(unittest.TestCase):
         self.assertEqual(len(first_claim), 1)
         self.assertEqual(first_claim[0]["proposal_id"], proposal["id"])
         self.assertEqual(second_claim, [])
+
+    def test_reminder_working_time_crosses_day_and_weekend(self):
+        zone = "America/Mexico_City"
+        thursday = datetime(2026, 9, 17, 17, 30, tzinfo=automation.ZoneInfo(zone))
+        friday = datetime(2026, 9, 18, 17, 30, tzinfo=automation.ZoneInfo(zone))
+
+        self.assertEqual(
+            automation.add_working_minutes(thursday, 120, zone).astimezone(
+                automation.ZoneInfo(zone)
+            ),
+            datetime(2026, 9, 18, 10, 30, tzinfo=automation.ZoneInfo(zone)),
+        )
+        self.assertEqual(
+            automation.add_working_minutes(friday, 120, zone).astimezone(
+                automation.ZoneInfo(zone)
+            ),
+            datetime(2026, 9, 21, 10, 30, tzinfo=automation.ZoneInfo(zone)),
+        )
+        self.assertEqual(
+            automation.next_weekday_start(friday, zone).astimezone(
+                automation.ZoneInfo(zone)
+            ),
+            datetime(2026, 9, 21, 9, 0, tzinfo=automation.ZoneInfo(zone)),
+        )
+
+    def test_ready_proposal_automatically_schedules_first_private_reminder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                _, proposal, _ = self._ready_proposal(db)
+                row = db.execute(
+                    "SELECT r.stage, r.state, r.due_at, p.ready_at "
+                    "FROM proposal_reminders r "
+                    "JOIN proposal_revisions p ON p.id = r.proposal_id "
+                    "WHERE r.proposal_id = ?",
+                    (proposal["id"],),
+                ).fetchone()
+
+        self.assertIsNotNone(row)
+        self.assertEqual((row["stage"], row["state"]), (1, "scheduled"))
+        due = datetime.fromisoformat(row["due_at"])
+        self.assertGreater(due, datetime.fromisoformat(row["ready_at"]))
+
+    def test_reminder_sweep_targets_exact_threads_and_becomes_digest_only(self):
+        zone = "America/Mexico_City"
+        first_send = datetime(2026, 9, 18, 17, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                _, first, _ = self._ready_proposal(
+                    db, dm_channel_id="D1", thread_ts="100.1"
+                )
+                second_conversation, _ = automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T1",
+                    owner_user_id="U_OWNER",
+                    repo="acme/web",
+                    pr_number=9,
+                    pr_url="https://github.com/acme/web/pull/9",
+                )
+                automation.bind_pr_conversation_thread(
+                    db,
+                    second_conversation,
+                    dm_channel_id="D2",
+                    thread_ts="200.2",
+                )
+                second = automation.create_proposal_revision(
+                    db, second_conversation, head_sha="b" * 40,
+                    state="awaiting_decision",
+                )
+                automation.schedule_proposal_reminder(
+                    db, first["id"], due_at=first_send - timedelta(minutes=1)
+                )
+                automation.schedule_proposal_reminder(
+                    db, second["id"], due_at=first_send - timedelta(minutes=1)
+                )
+
+            prs = {
+                "https://github.com/acme/api/pull/42": automation.PullRequest(
+                    url="https://github.com/acme/api/pull/42", repo="acme/api",
+                    number=42, title="API", body="", head_sha="a" * 40,
+                    base_ref="main", author_login="dev",
+                ),
+                "https://github.com/acme/web/pull/9": automation.PullRequest(
+                    url="https://github.com/acme/web/pull/9", repo="acme/web",
+                    number=9, title="Web", body="", head_sha="b" * 40,
+                    base_ref="main", author_login="dev",
+                ),
+            }
+            with patch.object(automation, "load_pr", side_effect=lambda url: prs[url]):
+                sweep = automation.reminder_sweep(
+                    str(database), claimant="cron-1", now=first_send,
+                    timezone_name=zone,
+                )
+            self.assertEqual(
+                {(item["channel_id"], item["thread_ts"]) for item in sweep["deliveries"]},
+                {("D1", "100.1"), ("D2", "200.2")},
+            )
+            first_item = next(
+                item for item in sweep["deliveries"] if item["proposal_id"] == first["id"]
+            )
+            ack = automation.ack_reminder_delivery(
+                str(database), reminder_id=first_item["reminder_id"],
+                delivery_id=first_item["delivery_id"], claimant="cron-1",
+                message_ts="300.3", now=first_send, timezone_name=zone,
+            )
+            self.assertEqual(ack["state"], "scheduled")
+            self.assertEqual(ack["stage"], 2)
+            self.assertEqual(
+                datetime.fromisoformat(ack["due_at"]).astimezone(
+                    automation.ZoneInfo(zone)
+                ),
+                datetime(2026, 9, 21, 9, 0, tzinfo=automation.ZoneInfo(zone)),
+            )
+
+            second_send = datetime.fromisoformat(ack["due_at"])
+            with patch.object(
+                automation, "load_pr", side_effect=lambda url: prs[url]
+            ):
+                second_sweep = automation.reminder_sweep(
+                    str(database), claimant="cron-2", now=second_send,
+                    timezone_name=zone,
+                )
+            second_item = next(
+                item for item in second_sweep["deliveries"]
+                if item["proposal_id"] == first["id"]
+            )
+            final_ack = automation.ack_reminder_delivery(
+                str(database), reminder_id=second_item["reminder_id"],
+                delivery_id=second_item["delivery_id"], claimant="cron-2",
+                message_ts="400.4", now=second_send, timezone_name=zone,
+            )
+            self.assertEqual(final_ack["state"], "digest_only")
+
+    def test_reminder_sweep_overlap_and_ambiguous_crash_do_not_duplicate(self):
+        now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                _, proposal, _ = self._ready_proposal(db)
+                automation.schedule_proposal_reminder(
+                    db, proposal["id"], due_at=now - timedelta(minutes=1)
+                )
+            pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/42", repo="acme/api",
+                number=42, title="API", body="", head_sha="a" * 40,
+                base_ref="main", author_login="dev",
+            )
+            with patch.object(automation, "load_pr", return_value=pr):
+                first = automation.reminder_sweep(
+                    str(database), claimant="cron-1", now=now, lease_seconds=60
+                )
+                overlap = automation.reminder_sweep(
+                    str(database), claimant="cron-2", now=now + timedelta(seconds=30)
+                )
+                recovered = automation.reminder_sweep(
+                    str(database), claimant="cron-3", now=now + timedelta(seconds=61)
+                )
+
+            self.assertEqual(len(first["deliveries"]), 1)
+            self.assertEqual(overlap["deliveries"], [])
+            self.assertEqual(recovered["deliveries"], [])
+            self.assertEqual(recovered["blocked_count"], 1)
+            with automation.connect_db(database) as db:
+                reminder = db.execute(
+                    "SELECT state FROM proposal_reminders WHERE proposal_id = ?",
+                    (proposal["id"],),
+                ).fetchone()
+            self.assertEqual(reminder["state"], "blocked")
+
+    def test_digest_lists_digest_only_proposals_without_counting_as_reviews(self):
+        now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                _, proposal, _ = self._ready_proposal(db)
+                automation.schedule_proposal_reminder(
+                    db, proposal["id"], due_at=now - timedelta(minutes=1)
+                )
+                db.execute(
+                    "UPDATE proposal_reminders SET stage = 2, state = 'digest_only', "
+                    "due_at = NULL, last_sent_at = ? WHERE proposal_id = ?",
+                    (automation.iso(now), proposal["id"]),
+                )
+                db.commit()
+
+            digest = automation.digest_source(
+                str(database), timezone_name="America/Mexico_City", now=now
+            )
+
+        self.assertEqual(digest["review_count"], 0)
+        self.assertEqual(digest["pending_review_count"], 1)
+        self.assertEqual(digest["pending_reviews"][0]["revision_token"], "P1")
 
     def test_expired_analysis_reclaims_retry_output_and_head_drift(self):
         now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
