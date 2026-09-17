@@ -14,6 +14,46 @@ from automation import review_automation as automation
 
 
 class ReviewAutomationTests(unittest.TestCase):
+    def _delta_result(
+        self,
+        *,
+        head_sha,
+        baseline_head_sha,
+        status="available",
+        findings=(),
+        addressed=(),
+        still_open=(),
+        new=(),
+    ):
+        return {
+            "repo": "acme/api",
+            "pr_number": 42,
+            "head_sha": head_sha,
+            "baseline_head_sha": baseline_head_sha,
+            "event": "COMMENT" if findings else "APPROVE",
+            "published": False,
+            "objective": "Protect persisted prices",
+            "summary": "Re-reviewed the latest revision.",
+            "findings": list(findings),
+            "delta": {
+                "status": status,
+                "summary": (
+                    "delta unavailable; full latest-head review"
+                    if status == "unavailable"
+                    else "Updated price persistence and worker error handling."
+                ),
+                "addressed_candidate_ids": list(addressed),
+                "still_open_candidate_ids": list(still_open),
+                "new_candidate_ids": list(new),
+            },
+            "linear": {"fetch_status": "missing"},
+            "limitations": (
+                ["Exact baseline comparison was unavailable after a force-push."]
+                if status == "unavailable"
+                else []
+            ),
+        }
+
     def _ready_proposal(
         self,
         db,
@@ -632,6 +672,416 @@ class ReviewAutomationTests(unittest.TestCase):
         self.assertTrue(decision_created)
         self.assertFalse(replayed_created)
         self.assertEqual(replayed_id, decision_id)
+
+    def test_repeated_intake_on_new_head_reuses_conversation_and_persists_delta(self):
+        old_head = "a" * 40
+        new_head = "b" * 40
+        prior_c2 = {
+            "candidate_id": "C2",
+            "category": "error_handling",
+            "severity": "major",
+            "path": "worker.py",
+            "line": 17,
+            "start_line": None,
+            "side": "RIGHT",
+            "start_side": None,
+            "body": "The failure is still returned as success.",
+            "evidence": "The exception branch still returns an empty success.",
+            "blocking": True,
+        }
+        new_c3 = {
+            "candidate_id": "C3",
+            "category": "correctness",
+            "severity": "major",
+            "path": "price.py",
+            "line": 50,
+            "start_line": None,
+            "side": "RIGHT",
+            "start_side": None,
+            "body": "The new write can lose the stored currency.",
+            "evidence": "The update omits currency from the persisted value.",
+            "blocking": True,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, first, _ = self._ready_proposal(
+                    db, head_sha=old_head
+                )
+                request_id, _ = automation.get_or_create_source_request(
+                    db,
+                    workspace_id="T1",
+                    channel_id="C1",
+                    message_ts="1720001000.000100",
+                    requester_user_id="U_REQUESTER",
+                )
+                pr = automation.PullRequest(
+                    url="https://github.com/acme/api/pull/42",
+                    repo="acme/api",
+                    number=42,
+                    title="Fix persisted prices",
+                    body="",
+                    head_sha=new_head,
+                    base_ref="main",
+                    author_login="developer",
+                )
+                result = self._delta_result(
+                    head_sha=new_head,
+                    baseline_head_sha=old_head,
+                    findings=(prior_c2, new_c3),
+                    addressed=("C1",),
+                    still_open=("C2",),
+                    new=("C3",),
+                )
+                with patch.object(
+                    automation,
+                    "load_pr",
+                    side_effect=[pr, pr, pr],
+                ), patch.object(
+                    automation,
+                    "github_compare_context",
+                    return_value={"status": "available", "changed_files": ["price.py"]},
+                ), patch.object(
+                    automation, "invoke_codex", return_value=result
+                ) as invoke, patch.object(
+                    automation, "github_json_request"
+                ) as github_write, patch.object(
+                    automation, "cleanup_paseo_review_agent", return_value=[]
+                ):
+                    proposed = automation.propose_one(
+                        db,
+                        pr.url,
+                        "review-bot",
+                        request_id=request_id,
+                        workspace_id="T1",
+                        owner_user_id="U_OWNER",
+                        position=0,
+                    )
+                    replayed = automation.propose_one(
+                        db,
+                        pr.url,
+                        "review-bot",
+                        request_id=request_id,
+                        workspace_id="T1",
+                        owner_user_id="U_OWNER",
+                        position=0,
+                    )
+                revisions = db.execute(
+                    "SELECT revision_token, head_sha, baseline_head_sha, state "
+                    "FROM proposal_revisions WHERE conversation_id = ? "
+                    "ORDER BY revision_number",
+                    (conversation_id,),
+                ).fetchall()
+                context = automation.proposal_context(
+                    db, conversation_id=conversation_id, revision_token="P2"
+                )
+
+        self.assertEqual(first["revision_token"], "P1")
+        self.assertEqual(proposed["revision_token"], "P2")
+        self.assertEqual(replayed["revision_token"], "P2")
+        self.assertTrue(replayed["reused"])
+        self.assertEqual(len(revisions), 2)
+        self.assertEqual(revisions[0]["state"], "superseded")
+        self.assertEqual(revisions[1]["baseline_head_sha"], old_head)
+        self.assertEqual(context["delta"]["addressed_candidate_ids"], ["C1"])
+        self.assertEqual(context["delta"]["still_open_candidate_ids"], ["C2"])
+        self.assertEqual(context["delta"]["new_candidate_ids"], ["C3"])
+        self.assertEqual(invoke.call_args.kwargs["baseline_head_sha"], old_head)
+        self.assertEqual(
+            [item["candidate_id"] for item in invoke.call_args.kwargs["prior_findings"]],
+            ["C1", "C2"],
+        )
+        github_write.assert_not_called()
+
+    def test_force_push_falls_back_to_full_review_labeled_delta_unavailable(self):
+        old_head = "a" * 40
+        new_head = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, _, _ = self._ready_proposal(db, head_sha=old_head)
+                request_id, _ = automation.get_or_create_source_request(
+                    db,
+                    workspace_id="T1",
+                    channel_id="C1",
+                    message_ts="1720001000.000100",
+                    requester_user_id="U_REQUESTER",
+                )
+                pr = automation.PullRequest(
+                    url="https://github.com/acme/api/pull/42",
+                    repo="acme/api",
+                    number=42,
+                    title="Force-pushed prices",
+                    body="",
+                    head_sha=new_head,
+                    base_ref="main",
+                    author_login="developer",
+                )
+                result = self._delta_result(
+                    head_sha=new_head,
+                    baseline_head_sha=old_head,
+                    status="unavailable",
+                )
+                with patch.object(
+                    automation, "load_pr", side_effect=[pr, pr]
+                ), patch.object(
+                    automation,
+                    "github_compare_context",
+                    return_value={"status": "unavailable", "reason": "base missing"},
+                ), patch.object(
+                    automation, "invoke_codex", return_value=result
+                ) as invoke, patch.object(
+                    automation, "github_json_request"
+                ) as github_write, patch.object(
+                    automation, "cleanup_paseo_review_agent", return_value=[]
+                ):
+                    proposed = automation.propose_one(
+                        db,
+                        pr.url,
+                        "review-bot",
+                        request_id=request_id,
+                        workspace_id="T1",
+                        owner_user_id="U_OWNER",
+                        position=0,
+                    )
+                context = automation.proposal_context(
+                    db,
+                    conversation_id=conversation_id,
+                    revision_token=proposed["revision_token"],
+                )
+
+        self.assertEqual(proposed["delta_status"], "unavailable")
+        self.assertFalse(context["delta_available"])
+        self.assertEqual(context["delta"]["status"], "unavailable")
+        self.assertIn("delta unavailable", context["delta"]["summary"])
+        self.assertEqual(
+            invoke.call_args.kwargs["compare_context"]["status"], "unavailable"
+        )
+        github_write.assert_not_called()
+
+    def test_head_change_during_analysis_supersedes_output_and_queues_latest_head(self):
+        baseline = "a" * 40
+        analyzed_head = "b" * 40
+        latest_head = "c" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, _, _ = self._ready_proposal(db, head_sha=baseline)
+                request_id, _ = automation.get_or_create_source_request(
+                    db,
+                    workspace_id="T1",
+                    channel_id="C1",
+                    message_ts="1720001000.000100",
+                    requester_user_id="U_REQUESTER",
+                )
+                def pr(head):
+                    return automation.PullRequest(
+                        url="https://github.com/acme/api/pull/42",
+                        repo="acme/api",
+                        number=42,
+                        title="Changing prices",
+                        body="",
+                        head_sha=head,
+                        base_ref="main",
+                        author_login="developer",
+                    )
+                result = self._delta_result(
+                    head_sha=analyzed_head,
+                    baseline_head_sha=baseline,
+                    addressed=("C1", "C2"),
+                )
+                with patch.object(
+                    automation,
+                    "load_pr",
+                    side_effect=[pr(analyzed_head), pr(latest_head)],
+                ), patch.object(
+                    automation,
+                    "github_compare_context",
+                    return_value={"status": "available"},
+                ), patch.object(
+                    automation, "invoke_codex", return_value=result
+                ), patch.object(
+                    automation, "cleanup_paseo_review_agent", return_value=[]
+                ):
+                    proposed = automation.propose_one(
+                        db,
+                        pr(analyzed_head).url,
+                        "review-bot",
+                        request_id=request_id,
+                        workspace_id="T1",
+                        owner_user_id="U_OWNER",
+                        position=0,
+                    )
+                revisions = db.execute(
+                    "SELECT revision_token, head_sha, baseline_head_sha, state "
+                    "FROM proposal_revisions WHERE conversation_id = ? "
+                    "ORDER BY revision_number",
+                    (conversation_id,),
+                ).fetchall()
+
+        self.assertEqual(proposed["status"], "head_changed_during_analysis")
+        self.assertEqual(proposed["re_review"]["revision_token"], "P3")
+        self.assertEqual(proposed["re_review"]["head_sha"], latest_head)
+        self.assertEqual(revisions[1]["state"], "superseded")
+        self.assertEqual(revisions[2]["state"], "queued")
+        self.assertEqual(revisions[2]["baseline_head_sha"], baseline)
+
+    def test_stale_action_runs_re_review_and_rejects_old_revision(self):
+        old_head = "a" * 40
+        new_head = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, _, _ = self._ready_proposal(db, head_sha=old_head)
+                request_id, _ = automation.get_or_create_source_request(
+                    db,
+                    workspace_id="T1",
+                    channel_id="C1",
+                    message_ts="1720001000.000100",
+                    requester_user_id="U_REQUESTER",
+                )
+                automation.associate_request_conversation(
+                    db, request_id, conversation_id, position=0
+                )
+                pr = automation.PullRequest(
+                    url="https://github.com/acme/api/pull/42",
+                    repo="acme/api",
+                    number=42,
+                    title="Fix persisted prices",
+                    body="",
+                    head_sha=new_head,
+                    base_ref="main",
+                    author_login="developer",
+                )
+                result = self._delta_result(
+                    head_sha=new_head,
+                    baseline_head_sha=old_head,
+                    addressed=("C1", "C2"),
+                )
+                with patch.object(
+                    automation, "load_pr", side_effect=[pr, pr]
+                ), patch.object(
+                    automation,
+                    "github_compare_context",
+                    return_value={"status": "available"},
+                ), patch.object(
+                    automation, "invoke_codex", return_value=result
+                ), patch.object(
+                    automation, "github_json_request"
+                ) as github_write, patch.object(
+                    automation, "cleanup_paseo_review_agent", return_value=[]
+                ):
+                    stale = automation.execute_thread_command(
+                        db,
+                        workspace_id="T1",
+                        dm_channel_id="D1",
+                        thread_ts="1720000000.000100",
+                        owner_user_id="U_OWNER",
+                        command_text="approve P1",
+                        idempotency_key="stale-action",
+                    )
+                with self.assertRaisesRegex(
+                    automation.AutomationError, "revision"
+                ):
+                    automation.execute_thread_command(
+                        db,
+                        workspace_id="T1",
+                        dm_channel_id="D1",
+                        thread_ts="1720000000.000100",
+                        owner_user_id="U_OWNER",
+                        command_text="approve P1",
+                        idempotency_key="stale-action-again",
+                    )
+
+        self.assertEqual(stale["status"], "stale_head")
+        self.assertEqual(stale["re_review"]["status"], "awaiting_decision")
+        self.assertEqual(stale["re_review"]["revision_token"], "P2")
+        github_write.assert_not_called()
+
+    def test_external_merge_or_close_finishes_all_linked_requests_and_reminders(self):
+        for pr_state, outcome in (("MERGED", "merged_externally"), ("CLOSED", "closed_externally")):
+            with self.subTest(pr_state=pr_state), tempfile.TemporaryDirectory() as directory:
+                database = Path(directory) / "reviews.sqlite3"
+                with automation.connect_db(database) as db:
+                    conversation_id, proposal, _ = self._ready_proposal(db)
+                    request_ids = []
+                    for index in range(2):
+                        request_id, _ = automation.get_or_create_source_request(
+                            db,
+                            workspace_id="T1",
+                            channel_id="C1",
+                            message_ts=f"17200010{index}0.000100",
+                            requester_user_id="U_REQUESTER",
+                        )
+                        automation.associate_request_conversation(
+                            db, request_id, conversation_id, position=0
+                        )
+                        request_ids.append(request_id)
+                    automation.schedule_proposal_reminder(
+                        db,
+                        proposal["id"],
+                        due_at=datetime.now(timezone.utc) + timedelta(hours=2),
+                    )
+                    current_pr = automation.PullRequest(
+                        url="https://github.com/acme/api/pull/42",
+                        repo="acme/api",
+                        number=42,
+                        title="Finished prices",
+                        body="",
+                        head_sha="a" * 40,
+                        base_ref="main",
+                        author_login="developer",
+                        state=pr_state,
+                    )
+                    with patch.object(
+                        automation, "load_pr", return_value=current_pr
+                    ), patch.object(
+                        automation, "github_json_request"
+                    ) as github_write:
+                        terminal = automation.execute_thread_command(
+                            db,
+                            workspace_id="T1",
+                            dm_channel_id="D1",
+                            thread_ts="1720000000.000100",
+                            owner_user_id="U_OWNER",
+                            command_text="skip P1",
+                            idempotency_key=f"external-{pr_state}",
+                        )
+                    members = db.execute(
+                        "SELECT state FROM workflow_request_members "
+                        "WHERE conversation_id = ? ORDER BY request_id",
+                        (conversation_id,),
+                    ).fetchall()
+                    reminder_state = db.execute(
+                        "SELECT state FROM proposal_reminders WHERE proposal_id = ?",
+                        (proposal["id"],),
+                    ).fetchone()[0]
+                    projections = [
+                        automation.source_request_projection(db, request_id)
+                        for request_id in request_ids
+                    ]
+
+                self.assertEqual(terminal["status"], outcome)
+                self.assertEqual([row["state"] for row in members], [outcome, outcome])
+                self.assertEqual(reminder_state, "completed")
+                self.assertTrue(all(item["state"] == "completed" for item in projections))
+                self.assertTrue(
+                    all(item["reaction_name"] == "white_check_mark" for item in projections)
+                )
+                github_write.assert_not_called()
+
+    def test_re_review_skill_contracts_keep_delta_private_and_automatic(self):
+        root = Path(__file__).resolve().parents[1]
+        reviewer = (root / "skills/pr-reviewer/SKILL.md").read_text()
+        workflow = (root / "skills/pr-reviewer/references/workflow.md").read_text()
+        orchestrator = (root / "skills/codex-pr-review/SKILL.md").read_text()
+
+        self.assertIn("comparison preflight", reviewer)
+        self.assertIn("latest-head freshness check", workflow)
+        self.assertIn("automatic re-review", orchestrator)
+        self.assertIn("addressed / still open / new", orchestrator)
+        self.assertIn("merged externally", orchestrator)
+        self.assertIn("closed externally", orchestrator)
 
     def test_proposal_result_persists_immutable_candidate_findings(self):
         now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)

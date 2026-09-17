@@ -110,6 +110,8 @@ There is no other path to an approval proposal. A single correctness / security 
    - Put prior IDs no longer applicable in `addressed_candidate_ids`, live prior IDs in `still_open_candidate_ids`, and newly introduced IDs in `new_candidate_ids`.
    - Set `delta.status` to `available` and summarize changed behavior and relevant files or structural units. If force-push or missing objects prevent an exact comparison, set it to `unavailable`, perform a full current-head review, and state the limitation without guessing which prior items were addressed.
    - On an initial review, use `baseline_head_sha: null`, `delta.status: initial`, no addressed/still-open IDs, and list each current candidate in `new_candidate_ids`.
+   - Treat the caller's comparison preflight as authoritative. When it reports unavailable, use the full latest-head fallback and leave addressed/still-open classifications empty.
+   - The caller performs a latest-head freshness check before persistence. Emit only the target-head result; a later head is handled as a new proposal revision in the same conversation.
 
 9. **Apply the gate** above to propose `APPROVE` vs `COMMENT`, including the authorship condition. Never attempt `APPROVE` when `author.login == ME`; this skill never attempts either event.
 

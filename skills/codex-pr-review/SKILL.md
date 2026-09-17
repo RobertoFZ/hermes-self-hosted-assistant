@@ -85,10 +85,18 @@ python3 /opt/review-automation/review_automation.py decide \
 ```
 
 Render its result once in the mapped private thread. A `stale_head` result is not
-an approval or publication; explain that the old decision was invalidated and
-that a new head-bound proposal is required. A `recovery_required` result means
-the exact command may be retried, but no bypass or direct GitHub command is
-allowed.
+an approval or publication. Its `re_review` field is the authoritative automatic re-review
+work or result for the latest head; render that revision in the same
+thread and require a new exact command. When the delta is available, show
+`addressed / still open / new` separately. When it is unavailable, say
+`delta unavailable` and present the full latest-head review without inferring
+prior outcomes. A `recovery_required` result means the exact command may be
+retried, but no bypass or direct GitHub command is allowed.
+
+If GitHub reports `merged_externally` (merged externally) or
+`closed_externally` (closed externally), treat the PR as
+terminal, stop prompting for a decision, and let the Slack gate refresh every
+linked source verdict from the returned projection updates.
 
 ## Boundaries
 
@@ -103,3 +111,5 @@ allowed.
   error into the source channel. Only the Slack gate's compact shared verdict is
   public.
 - Never retry by changing an idempotency key or by bypassing a blocked action.
+- Never replay an old revision command after automatic re-review; only the latest
+  revision token in the existing PR thread can authorize an action.

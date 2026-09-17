@@ -168,6 +168,66 @@ def gh_paginated(endpoint: str) -> list[dict[str, Any]]:
     return [item for item in pages if isinstance(item, dict)]
 
 
+def github_compare_context(
+    pr: PullRequest,
+    baseline_head_sha: str,
+) -> dict[str, Any]:
+    """Read the exact baseline-to-target comparison, or describe why it is unavailable."""
+    owner, repo = pr.repo.split("/", 1)
+    endpoint = (
+        f"repos/{owner}/{repo}/compare/{baseline_head_sha}...{pr.head_sha}"
+    )
+    try:
+        completed = run(
+            ["gh", "api", endpoint],
+            timeout=60,
+            check=False,
+            env=os.environ.copy(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"status": "unavailable", "reason": str(exc)}
+    if completed.returncode:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        return {
+            "status": "unavailable",
+            "reason": detail or "GitHub could not compare the exact baseline",
+        }
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return {
+            "status": "unavailable",
+            "reason": "GitHub returned an invalid comparison response",
+        }
+    if not isinstance(payload, dict) or not isinstance(payload.get("merge_base_commit"), dict):
+        return {
+            "status": "unavailable",
+            "reason": "GitHub did not establish a merge base for the exact baseline",
+        }
+    return {
+        "status": "available",
+        "comparison_status": str(payload.get("status") or ""),
+        "ahead_by": int(payload.get("ahead_by") or 0),
+        "behind_by": int(payload.get("behind_by") or 0),
+        "merge_base_sha": str((payload.get("merge_base_commit") or {}).get("sha") or ""),
+        "commits": [
+            str(item.get("sha") or "")
+            for item in payload.get("commits") or []
+            if isinstance(item, dict) and item.get("sha")
+        ],
+        "changed_files": [
+            {
+                "path": str(item.get("filename") or ""),
+                "status": str(item.get("status") or ""),
+                "additions": int(item.get("additions") or 0),
+                "deletions": int(item.get("deletions") or 0),
+            }
+            for item in payload.get("files") or []
+            if isinstance(item, dict) and item.get("filename")
+        ],
+    }
+
+
 def load_pr(url: str) -> PullRequest:
     expected_repo, expected_number = parse_pr_url(url)
     data = gh_json(
@@ -1112,6 +1172,140 @@ def active_proposal(
         (conversation_id,),
     ).fetchone()
     return _row_dict(row) if row is not None else None
+
+
+def latest_proposal(
+    db: sqlite3.Connection,
+    conversation_id: str,
+) -> dict[str, Any] | None:
+    row = db.execute(
+        """
+        SELECT * FROM proposal_revisions
+        WHERE conversation_id = ?
+        ORDER BY revision_number DESC LIMIT 1
+        """,
+        (conversation_id,),
+    ).fetchone()
+    return _row_dict(row) if row is not None else None
+
+
+def _effective_reviewed_baseline(proposal: Mapping[str, Any] | None) -> str | None:
+    """Keep the last completed review as baseline while newer analysis is in flight."""
+    if proposal is None:
+        return None
+    if proposal.get("structured_result") is not None:
+        return str(proposal["head_sha"])
+    baseline = proposal.get("baseline_head_sha")
+    return str(baseline) if baseline else None
+
+
+def finalize_external_pr(
+    db: sqlite3.Connection,
+    *,
+    conversation_id: str,
+    pr: PullRequest,
+) -> dict[str, Any]:
+    """Terminalize every workflow projection when GitHub reports merge or close."""
+    if pr.state not in {"MERGED", "CLOSED"}:
+        raise AutomationError("external PR completion requires MERGED or CLOSED state")
+    outcome = "merged_externally" if pr.state == "MERGED" else "closed_externally"
+    stamp = iso(utc_now())
+    try:
+        _begin_immediate(db)
+        request_ids = [
+            str(row["request_id"])
+            for row in db.execute(
+                "SELECT request_id FROM workflow_request_members "
+                "WHERE conversation_id = ? ORDER BY request_id",
+                (conversation_id,),
+            ).fetchall()
+        ]
+        proposal_ids = [
+            str(row["id"])
+            for row in db.execute(
+                "SELECT id FROM proposal_revisions WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchall()
+        ]
+        db.execute(
+            """
+            UPDATE proposal_revisions
+            SET state = ?, terminal_at = COALESCE(terminal_at, ?),
+                superseded_at = CASE
+                    WHEN state IN ('queued', 'analyzing', 'output_pending',
+                                   'awaiting_decision', 'publishing')
+                    THEN COALESCE(superseded_at, ?) ELSE superseded_at END
+            WHERE conversation_id = ?
+              AND state NOT IN ('completed', 'merged_externally', 'closed_externally')
+            """,
+            (outcome, stamp, stamp, conversation_id),
+        )
+        if proposal_ids:
+            placeholders = ",".join("?" for _ in proposal_ids)
+            db.execute(
+                f"""
+                UPDATE proposal_decisions
+                SET state = 'rejected_external', completed_at = COALESCE(completed_at, ?),
+                    error = ?
+                WHERE proposal_id IN ({placeholders})
+                  AND state IN ('accepted', 'executing')
+                """,
+                (stamp, f"pull request {pr.state.lower()} externally", *proposal_ids),
+            )
+            db.execute(
+                f"""
+                UPDATE proposal_reminders
+                SET state = 'completed', due_at = NULL, claimant = NULL,
+                    lease_expires_at = NULL, updated_at = ?
+                WHERE proposal_id IN ({placeholders}) AND state != 'completed'
+                """,
+                (stamp, *proposal_ids),
+            )
+            db.execute(
+                f"""
+                UPDATE analysis_attempts
+                SET state = 'abandoned_external', completed_at = COALESCE(completed_at, ?),
+                    lease_expires_at = NULL,
+                    error = ?
+                WHERE proposal_id IN ({placeholders})
+                  AND state IN ('running', 'output_received', 'ready_to_persist')
+                """,
+                (stamp, f"pull request {pr.state.lower()} externally", *proposal_ids),
+            )
+            db.execute(
+                f"""
+                UPDATE workflow_actions
+                SET state = 'blocked', completed_at = COALESCE(completed_at, ?),
+                    lease_expires_at = NULL, error = ?
+                WHERE decision_id IN (
+                    SELECT id FROM proposal_decisions
+                    WHERE proposal_id IN ({placeholders})
+                ) AND state NOT IN ('completed', 'blocked', 'failed')
+                """,
+                (stamp, f"pull request {pr.state.lower()} externally", *proposal_ids),
+            )
+        db.execute(
+            """
+            UPDATE workflow_request_members
+            SET state = ?, outcome = ?, reviewed_head = ?,
+                published_comment_count = 0, error = NULL, updated_at = ?
+            WHERE conversation_id = ?
+            """,
+            (outcome, outcome, pr.head_sha, stamp, conversation_id),
+        )
+        for request_id in request_ids:
+            _refresh_source_request_locked(db, request_id, stamp=stamp)
+        db.commit()
+        return {
+            "status": outcome,
+            "conversation_id": conversation_id,
+            "head_sha": pr.head_sha,
+            "request_ids": request_ids,
+            "projection_updates": request_ids,
+        }
+    except Exception:
+        db.rollback()
+        raise
 
 
 def validate_proposal_revision(
@@ -2290,7 +2484,14 @@ def load_paseo_structured_result(
     return None, warnings
 
 
-def invoke_codex(pr: PullRequest, *, run_id: str) -> dict[str, Any]:
+def invoke_codex(
+    pr: PullRequest,
+    *,
+    run_id: str,
+    baseline_head_sha: str | None = None,
+    prior_findings: Sequence[Mapping[str, Any]] = (),
+    compare_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     host = paseo_host()
     workspace = os.environ.get("REVIEW_MONOREPO_ROOT", "").strip()
     if not workspace:
@@ -2306,6 +2507,41 @@ def invoke_codex(pr: PullRequest, *, run_id: str) -> dict[str, Any]:
         "Return only the structured result required by the supplied output schema with "
         "published set to false."
     )
+    if baseline_head_sha is not None:
+        prior_payload = [
+            {
+                key: finding.get(key)
+                for key in (
+                    "candidate_id",
+                    "category",
+                    "severity",
+                    "path",
+                    "line",
+                    "start_line",
+                    "side",
+                    "start_side",
+                    "body",
+                    "evidence",
+                    "blocking",
+                )
+            }
+            for finding in prior_findings
+        ]
+        comparison = dict(compare_context or {"status": "unavailable"})
+        prompt += (
+            "\nThis is a re-review in the existing PR conversation. Compare the exact "
+            f"baseline {baseline_head_sha} with target {pr.head_sha}. The persisted prior "
+            "candidate set and comparison preflight follow as JSON. Preserve still-open "
+            "candidate IDs and classify addressed, still-open, and new findings. "
+            f"PRIOR_FINDINGS={json.dumps(prior_payload, sort_keys=True)}\n"
+            f"COMPARE_CONTEXT={json.dumps(comparison, sort_keys=True)}"
+        )
+        if str(comparison.get("status")) == "unavailable":
+            prompt += (
+                "\nThe exact comparison could not be established. Perform a full review of "
+                "the latest head, set delta.status to unavailable, label the delta summary "
+                "with 'delta unavailable', and do not guess which prior findings were addressed."
+            )
     command = [
         "paseo",
         "run",
@@ -2361,6 +2597,85 @@ def validate_proposal_result(result: Mapping[str, Any], pr: PullRequest) -> None
         raise AutomationError("Codex proposal objective is required")
     if not isinstance(result.get("findings"), list):
         raise AutomationError("Codex proposal findings must be a list")
+
+
+def validate_delta_result(
+    result: Mapping[str, Any],
+    pr: PullRequest,
+    *,
+    baseline_head_sha: str | None,
+    prior_findings: Sequence[Mapping[str, Any]],
+    compare_context: Mapping[str, Any] | None,
+) -> None:
+    """Validate Codex lineage so an inconsistent delta never becomes actionable."""
+    validate_proposal_result(result, pr)
+    actual_baseline = result.get("baseline_head_sha")
+    if (str(actual_baseline) if actual_baseline is not None else None) != baseline_head_sha:
+        raise AutomationError("Codex result baseline SHA does not match persisted lineage")
+    delta = result.get("delta")
+    if not isinstance(delta, Mapping):
+        raise AutomationError("Codex proposal delta is required")
+    status = str(delta.get("status") or "")
+    if baseline_head_sha is None:
+        if status != "initial":
+            raise AutomationError("initial proposal must have initial delta status")
+        return
+
+    expected_status = (
+        "available"
+        if str((compare_context or {}).get("status")) == "available"
+        else "unavailable"
+    )
+    if status != expected_status:
+        raise AutomationError(
+            f"Codex delta status {status or 'missing'} does not match {expected_status} comparison"
+        )
+    groups: dict[str, list[str]] = {}
+    for key in (
+        "addressed_candidate_ids",
+        "still_open_candidate_ids",
+        "new_candidate_ids",
+    ):
+        value = delta.get(key)
+        if not isinstance(value, list) or any(
+            not isinstance(item, str) or re.fullmatch(CANDIDATE_TOKEN_PATTERN, item) is None
+            for item in value
+        ):
+            raise AutomationError(f"Codex delta {key} is invalid")
+        if len(value) != len(set(value)):
+            raise AutomationError(f"Codex delta {key} contains duplicates")
+        groups[key] = value
+    classified = [item for value in groups.values() for item in value]
+    if len(classified) != len(set(classified)):
+        raise AutomationError("Codex delta candidate classifications overlap")
+
+    prior_ids = {str(item.get("candidate_id") or "") for item in prior_findings}
+    current_ids = {
+        str(item.get("candidate_id") or "") for item in result.get("findings") or []
+    }
+    if status == "unavailable":
+        if groups["addressed_candidate_ids"] or groups["still_open_candidate_ids"]:
+            raise AutomationError("unavailable delta must not guess prior finding outcomes")
+        summary = str(delta.get("summary") or "").lower()
+        if "delta unavailable" not in summary:
+            raise AutomationError("unavailable delta must be clearly labeled")
+        return
+
+    addressed = set(groups["addressed_candidate_ids"])
+    still_open = set(groups["still_open_candidate_ids"])
+    new = set(groups["new_candidate_ids"])
+    if addressed | still_open != prior_ids:
+        raise AutomationError("available delta must classify every prior finding")
+    if still_open | new != current_ids:
+        raise AutomationError("available delta must classify every current finding")
+    if not still_open <= prior_ids or new & prior_ids:
+        raise AutomationError("available delta does not preserve prior candidate identity")
+    highest_prior = max(
+        (int(item[1:]) for item in prior_ids if re.fullmatch(CANDIDATE_TOKEN_PATTERN, item)),
+        default=0,
+    )
+    if any(int(item[1:]) <= highest_prior for item in new):
+        raise AutomationError("new delta candidates must follow prior candidate IDs")
 
 
 def persist_verified(
@@ -2826,6 +3141,15 @@ def proposal_context(
             finding_by_id[selected[0]]["edited"] = True
     result = dict(proposal)
     result["findings"] = list(finding_by_id.values())
+    structured = json.loads(str(proposal["structured_result"])) if proposal.get("structured_result") else {}
+    result["delta"] = structured.get("delta") or {
+        "status": "pending",
+        "summary": None,
+        "addressed_candidate_ids": [],
+        "still_open_candidate_ids": [],
+        "new_candidate_ids": [],
+    }
+    result["limitations"] = list(structured.get("limitations") or [])
     return result
 
 
@@ -2868,64 +3192,113 @@ def thread_context(
     return context
 
 
-def propose_one(
+def _proposal_for_baseline(
     db: sqlite3.Connection,
-    url: str,
-    login: str,
     *,
-    request_id: str,
-    workspace_id: str,
-    owner_user_id: str,
-    position: int,
-    claimant: str = "proposal-cli",
+    conversation_id: str,
+    baseline_head_sha: str | None,
+) -> dict[str, Any] | None:
+    if baseline_head_sha is None:
+        return None
+    row = db.execute(
+        """
+        SELECT * FROM proposal_revisions
+        WHERE conversation_id = ? AND head_sha = ? AND structured_result IS NOT NULL
+        ORDER BY revision_number DESC LIMIT 1
+        """,
+        (conversation_id, baseline_head_sha),
+    ).fetchone()
+    return _row_dict(row) if row is not None else None
+
+
+def _queue_latest_head_after_drift(
+    db: sqlite3.Connection,
+    *,
+    proposal: Mapping[str, Any],
+    attempt_id: str,
+    latest_pr: PullRequest,
 ) -> dict[str, Any]:
-    """Generate and persist one read-only, head-bound proposal."""
-    pr = load_pr(url)
-    if pr.state != "OPEN":
-        return {"url": pr.url, "status": f"pr_{pr.state.lower()}", "head_sha": pr.head_sha}
-    conversation_id, _ = get_or_create_pr_conversation(
-        db,
-        workspace_id=workspace_id,
-        owner_user_id=owner_user_id,
-        repo=pr.repo,
-        pr_number=pr.number,
-        pr_url=pr.url,
+    stamp = iso(utc_now())
+    baseline = _effective_reviewed_baseline(proposal)
+    try:
+        _begin_immediate(db)
+        db.execute(
+            """
+            UPDATE analysis_attempts
+            SET state = 'abandoned_head_changed', completed_at = ?,
+                lease_expires_at = NULL,
+                error = 'PR head changed before proposal persistence'
+            WHERE id = ?
+            """,
+            (stamp, attempt_id),
+        )
+        queued = _create_proposal_revision_locked(
+            db,
+            str(proposal["conversation_id"]),
+            head_sha=latest_pr.head_sha,
+            baseline_head_sha=baseline,
+            state="queued",
+            now=utc_now(),
+        )
+        db.commit()
+        return queued
+    except Exception:
+        db.rollback()
+        raise
+
+
+def analyze_proposal_revision(
+    db: sqlite3.Connection,
+    *,
+    pr: PullRequest,
+    login: str,
+    proposal: Mapping[str, Any],
+    claimant: str,
+) -> dict[str, Any]:
+    """Run one read-only analysis and persist it only if the target head stays current."""
+    conversation_id = str(proposal["conversation_id"])
+    baseline = (
+        str(proposal["baseline_head_sha"])
+        if proposal.get("baseline_head_sha")
+        else None
     )
-    associate_request_conversation(db, request_id, conversation_id, position=position)
-    current = active_proposal(db, conversation_id)
-    if current is not None and str(current["head_sha"]) == pr.head_sha:
-        return {
-            "url": pr.url,
-            "status": str(current["state"]),
-            "conversation_id": conversation_id,
-            "proposal_id": str(current["id"]),
-            "revision_token": str(current["revision_token"]),
-            "head_sha": pr.head_sha,
-            "reused": True,
-        }
-    baseline = str(current["head_sha"]) if current is not None else None
-    proposal = create_proposal_revision(
+    baseline_proposal = _proposal_for_baseline(
         db,
-        conversation_id,
-        head_sha=pr.head_sha,
+        conversation_id=conversation_id,
         baseline_head_sha=baseline,
     )
+    prior_findings: list[dict[str, Any]] = []
+    if baseline_proposal is not None:
+        prior_context = proposal_context(
+            db,
+            conversation_id=conversation_id,
+            revision_token=str(baseline_proposal["revision_token"]),
+        )
+        prior_findings = list(prior_context["findings"])
+    compare_context = (
+        github_compare_context(pr, baseline) if baseline is not None else None
+    )
     claim_state, attempt_id = claim_analysis_attempt(
-        db, proposal["id"], claimant=claimant
+        db, str(proposal["id"]), claimant=claimant
     )
     if claim_state != "claimed":
         return {
             "url": pr.url,
             "status": "in_progress",
             "conversation_id": conversation_id,
-            "proposal_id": proposal["id"],
-            "revision_token": proposal["revision_token"],
+            "proposal_id": str(proposal["id"]),
+            "revision_token": str(proposal["revision_token"]),
             "head_sha": pr.head_sha,
         }
     cleanup_warnings: list[str] = []
     try:
-        result = invoke_codex(pr, run_id=proposal["id"])
-        validate_proposal_result(result, pr)
+        result = invoke_codex(
+            pr,
+            run_id=str(proposal["id"]),
+            baseline_head_sha=baseline,
+            prior_findings=prior_findings,
+            compare_context=compare_context,
+        )
         if pr.author_login.lower() == login.lower() and result.get("event") == "APPROVE":
             result = dict(result)
             result["event"] = "COMMENT"
@@ -2933,11 +3306,52 @@ def propose_one(
                 str(result.get("summary") or "")
                 + " Self-authored pull requests cannot be approved by this reviewer."
             ).strip()
+        validate_delta_result(
+            result,
+            pr,
+            baseline_head_sha=baseline,
+            prior_findings=prior_findings,
+            compare_context=compare_context,
+        )
         record_analysis_output(db, attempt_id=attempt_id, output=result)
+
+        latest_pr = load_pr(pr.url)
+        if (
+            latest_pr.repo.lower() != pr.repo.lower()
+            or latest_pr.number != pr.number
+        ):
+            raise AutomationError("GitHub returned a different PR during proposal analysis")
+        if latest_pr.state in {"MERGED", "CLOSED"}:
+            return finalize_external_pr(
+                db,
+                conversation_id=conversation_id,
+                pr=latest_pr,
+            )
+        if latest_pr.head_sha != pr.head_sha:
+            queued = _queue_latest_head_after_drift(
+                db,
+                proposal=proposal,
+                attempt_id=attempt_id,
+                latest_pr=latest_pr,
+            )
+            return {
+                "url": latest_pr.url,
+                "status": "head_changed_during_analysis",
+                "conversation_id": conversation_id,
+                "superseded_head": pr.head_sha,
+                "re_review": {
+                    "status": "queued",
+                    "proposal_id": str(queued["id"]),
+                    "revision_token": str(queued["revision_token"]),
+                    "baseline_head_sha": queued["baseline_head_sha"],
+                    "head_sha": latest_pr.head_sha,
+                },
+            }
+
         delta = result.get("delta") or {}
         persist_proposal_result(
             db,
-            proposal_id=proposal["id"],
+            proposal_id=str(proposal["id"]),
             attempt_id=attempt_id,
             reviewed_head=pr.head_sha,
             objective=str(result["objective"]),
@@ -2951,23 +3365,87 @@ def propose_one(
                 else None
             ),
         )
-        response = {
+        return {
             "url": pr.url,
             "status": "awaiting_decision",
             "conversation_id": conversation_id,
-            "proposal_id": proposal["id"],
-            "revision_token": proposal["revision_token"],
+            "proposal_id": str(proposal["id"]),
+            "revision_token": str(proposal["revision_token"]),
+            "baseline_head_sha": baseline,
             "head_sha": pr.head_sha,
             "objective": result["objective"],
             "event": result["event"],
             "summary": result["summary"],
             "finding_count": len(result.get("findings") or []),
+            "delta_status": str(delta.get("status") or "initial"),
+            "delta": dict(delta),
         }
-        return response
     finally:
-        cleanup_warnings.extend(cleanup_paseo_review_agent(proposal["id"]))
+        cleanup_warnings.extend(cleanup_paseo_review_agent(str(proposal["id"])))
         if cleanup_warnings:
             print("; ".join(cleanup_warnings), file=sys.stderr)
+
+
+def propose_one(
+    db: sqlite3.Connection,
+    url: str,
+    login: str,
+    *,
+    request_id: str,
+    workspace_id: str,
+    owner_user_id: str,
+    position: int,
+    claimant: str = "proposal-cli",
+) -> dict[str, Any]:
+    """Generate and persist one read-only, head-bound proposal."""
+    pr = load_pr(url)
+    conversation_id, _ = get_or_create_pr_conversation(
+        db,
+        workspace_id=workspace_id,
+        owner_user_id=owner_user_id,
+        repo=pr.repo,
+        pr_number=pr.number,
+        pr_url=pr.url,
+    )
+    associate_request_conversation(db, request_id, conversation_id, position=position)
+    if pr.state in {"MERGED", "CLOSED"}:
+        return finalize_external_pr(db, conversation_id=conversation_id, pr=pr)
+    if pr.state != "OPEN":
+        return {"url": pr.url, "status": f"pr_{pr.state.lower()}", "head_sha": pr.head_sha}
+    current = active_proposal(db, conversation_id)
+    if current is not None and str(current["head_sha"]) == pr.head_sha:
+        if str(current["state"]) == "queued":
+            return analyze_proposal_revision(
+                db,
+                pr=pr,
+                login=login,
+                proposal=current,
+                claimant=claimant,
+            )
+        return {
+            "url": pr.url,
+            "status": str(current["state"]),
+            "conversation_id": conversation_id,
+            "proposal_id": str(current["id"]),
+            "revision_token": str(current["revision_token"]),
+            "head_sha": pr.head_sha,
+            "reused": True,
+        }
+    previous = latest_proposal(db, conversation_id)
+    baseline = _effective_reviewed_baseline(previous)
+    proposal = create_proposal_revision(
+        db,
+        conversation_id,
+        head_sha=pr.head_sha,
+        baseline_head_sha=baseline,
+    )
+    return analyze_proposal_revision(
+        db,
+        pr=pr,
+        login=login,
+        proposal=proposal,
+        claimant=claimant,
+    )
 
 
 def propose_urls(
@@ -3216,6 +3694,43 @@ def _block_workflow_action(
     }
 
 
+def re_review_current_head(
+    db: sqlite3.Connection,
+    *,
+    conversation_id: str,
+    pr: PullRequest,
+    login: str,
+    claimant: str = "re-review",
+) -> dict[str, Any]:
+    """Create or resume exactly one latest-head proposal in the stable conversation."""
+    previous = latest_proposal(db, conversation_id)
+    baseline = _effective_reviewed_baseline(previous)
+    proposal = create_proposal_revision(
+        db,
+        conversation_id,
+        head_sha=pr.head_sha,
+        baseline_head_sha=baseline,
+    )
+    if not proposal.get("created") and str(proposal["state"]) != "queued":
+        return {
+            "url": pr.url,
+            "status": str(proposal["state"]),
+            "conversation_id": conversation_id,
+            "proposal_id": str(proposal["id"]),
+            "revision_token": str(proposal["revision_token"]),
+            "baseline_head_sha": proposal.get("baseline_head_sha"),
+            "head_sha": pr.head_sha,
+            "reused": True,
+        }
+    return analyze_proposal_revision(
+        db,
+        pr=pr,
+        login=login,
+        proposal=proposal,
+        claimant=claimant,
+    )
+
+
 def _publishable_candidates(
     context: Mapping[str, Any], selected: Sequence[str]
 ) -> list[dict[str, Any]]:
@@ -3323,6 +3838,12 @@ def execute_thread_command(
             reason="GitHub returned a different pull request target",
         )
     if pr.state != "OPEN":
+        if pr.state in {"MERGED", "CLOSED"}:
+            return finalize_external_pr(
+                db,
+                conversation_id=str(action_row["conversation_id"]),
+                pr=pr,
+            )
         return _block_workflow_action(
             db,
             decision_id=decision_id,
@@ -3332,7 +3853,7 @@ def execute_thread_command(
         )
     expected_head = str(action_row["expected_head"])
     if pr.head_sha != expected_head:
-        return _block_workflow_action(
+        stale_result = _block_workflow_action(
             db,
             decision_id=decision_id,
             action_id=action_id,
@@ -3340,6 +3861,30 @@ def execute_thread_command(
             reason=f"stale_head: expected {expected_head}, current {pr.head_sha}",
             stale=True,
         )
+        try:
+            stale_result["re_review"] = re_review_current_head(
+                db,
+                conversation_id=str(action_row["conversation_id"]),
+                pr=pr,
+                login=reviewer_login(),
+                claimant="stale-action-re-review",
+            )
+        except (AutomationError, OSError, subprocess.TimeoutExpired) as exc:
+            queued = active_proposal(db, str(action_row["conversation_id"]))
+            stale_result["re_review"] = {
+                "status": str(queued["state"]) if queued is not None else "failed",
+                "conversation_id": str(action_row["conversation_id"]),
+                "proposal_id": str(queued["id"]) if queued is not None else None,
+                "revision_token": (
+                    str(queued["revision_token"]) if queued is not None else None
+                ),
+                "baseline_head_sha": (
+                    queued.get("baseline_head_sha") if queued is not None else expected_head
+                ),
+                "head_sha": pr.head_sha,
+                "error": str(exc),
+            }
+        return stale_result
     if command.action == "skip":
         receipt = {"action": "skip", "head_sha": expected_head}
         _finish_workflow_action(
