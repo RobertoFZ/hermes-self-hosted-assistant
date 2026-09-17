@@ -1,0 +1,26 @@
+{
+  "01-clean-approvable": {
+    "must_find_categories": [],
+    "forbidden_categories": [
+      "correctness",
+      "security",
+      "migration_safety",
+      "test_coverage",
+      "architecture"
+    ],
+    "min_comments": 0,
+    "max_comments": 0
+  },
+  "03-mixed-minor": {
+    "must_find_categories": [],
+    "forbidden_categories": [
+      "correctness",
+      "security",
+      "migration_safety",
+      "test_coverage",
+      "architecture"
+    ],
+    "min_comments": 0,
+    "max_comments": 0
+  }
+}

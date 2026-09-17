@@ -1,4 +1,5 @@
 import unittest
+import json
 from pathlib import Path
 
 
@@ -26,12 +27,40 @@ CRON_CONFIG = (ROOT / "config" / "crons.json").read_text(encoding="utf-8")
 REVIEW_RESULT_SCHEMA = (
     ROOT / "automation" / "review-result.schema.json"
 ).read_text(encoding="utf-8")
+REVIEW_RESULT_SCHEMA_JSON = json.loads(REVIEW_RESULT_SCHEMA)
 
 
 class DeploymentToolingPolicyTests(unittest.TestCase):
     def test_review_result_schema_uses_paseo_compatible_draft(self):
         self.assertIn("http://json-schema.org/draft-07/schema#", REVIEW_RESULT_SCHEMA)
         self.assertNotIn("draft/2020-12", REVIEW_RESULT_SCHEMA)
+
+    def test_review_result_schema_is_a_read_only_material_proposal(self):
+        schema = REVIEW_RESULT_SCHEMA_JSON
+        self.assertIn("published", schema["required"])
+        self.assertEqual(schema["properties"]["published"], {"const": False})
+        self.assertIn("objective", schema["required"])
+        self.assertIn("baseline_head_sha", schema["required"])
+        self.assertIn("delta", schema["required"])
+
+        finding = schema["properties"]["findings"]["items"]
+        self.assertEqual(
+            set(finding["properties"]["category"]["enum"]),
+            {
+                "correctness",
+                "security",
+                "data_layer",
+                "migration_safety",
+                "architecture",
+                "test_coverage",
+                "error_handling",
+                "scraper",
+            },
+        )
+        self.assertEqual(
+            set(finding["properties"]["severity"]["enum"]),
+            {"blocker", "major", "minor", "nit"},
+        )
 
     def test_codex_cli_is_pinned_in_the_image(self):
         self.assertIn("ARG CODEX_VERSION=0.149.1", DOCKERFILE)

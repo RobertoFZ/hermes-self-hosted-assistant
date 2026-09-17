@@ -1,15 +1,19 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Read-only pull-request review proposal",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "repo",
     "pr_number",
     "head_sha",
+    "baseline_head_sha",
     "event",
     "published",
+    "objective",
     "summary",
     "findings",
+    "delta",
     "linear",
     "limitations"
   ],
@@ -17,25 +21,115 @@
     "repo": {"type": "string", "minLength": 1},
     "pr_number": {"type": "integer", "minimum": 1},
     "head_sha": {"type": "string", "minLength": 7},
+    "baseline_head_sha": {"type": ["string", "null"], "minLength": 7},
     "event": {"type": "string", "enum": ["APPROVE", "COMMENT"]},
-    "published": {"type": "boolean"},
+    "published": {"const": false},
+    "objective": {"type": "string", "minLength": 1},
     "summary": {"type": "string", "minLength": 1},
     "findings": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["category", "severity", "path", "line", "body", "blocking"],
+        "required": [
+          "candidate_id",
+          "category",
+          "severity",
+          "path",
+          "line",
+          "side",
+          "start_line",
+          "start_side",
+          "body",
+          "evidence",
+          "blocking"
+        ],
         "properties": {
+          "candidate_id": {"type": "string", "pattern": "^C[1-9][0-9]*$"},
           "category": {
             "type": "string",
-            "enum": ["correctness", "security", "performance", "maintainability", "testing", "product", "documentation", "other"]
+            "enum": [
+              "correctness",
+              "security",
+              "data_layer",
+              "migration_safety",
+              "architecture",
+              "test_coverage",
+              "error_handling",
+              "scraper"
+            ]
           },
-          "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
-          "path": {"type": ["string", "null"]},
+          "severity": {
+            "type": "string",
+            "enum": ["blocker", "major", "minor", "nit"]
+          },
+          "path": {"type": ["string", "null"], "minLength": 1},
           "line": {"type": ["integer", "null"], "minimum": 1},
+          "side": {"type": ["string", "null"], "enum": ["LEFT", "RIGHT", null]},
+          "start_line": {"type": ["integer", "null"], "minimum": 1},
+          "start_side": {"type": ["string", "null"], "enum": ["LEFT", "RIGHT", null]},
           "body": {"type": "string", "minLength": 1},
+          "evidence": {"type": "string", "minLength": 1},
           "blocking": {"type": "boolean"}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"path": {"type": "string"}}},
+            "then": {
+              "properties": {
+                "line": {"type": "integer", "minimum": 1},
+                "side": {"enum": ["LEFT", "RIGHT"]}
+              }
+            },
+            "else": {
+              "properties": {
+                "line": {"const": null},
+                "side": {"const": null},
+                "start_line": {"const": null},
+                "start_side": {"const": null}
+              }
+            }
+          },
+          {
+            "if": {"properties": {"start_line": {"type": "integer"}}},
+            "then": {
+              "properties": {
+                "path": {"type": "string", "minLength": 1},
+                "start_side": {"enum": ["LEFT", "RIGHT"]}
+              }
+            },
+            "else": {"properties": {"start_side": {"const": null}}}
+          }
+        ]
+      }
+    },
+    "delta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "summary",
+        "addressed_candidate_ids",
+        "still_open_candidate_ids",
+        "new_candidate_ids"
+      ],
+      "properties": {
+        "status": {"type": "string", "enum": ["initial", "available", "unavailable"]},
+        "summary": {"type": ["string", "null"]},
+        "addressed_candidate_ids": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^C[1-9][0-9]*$"},
+          "uniqueItems": true
+        },
+        "still_open_candidate_ids": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^C[1-9][0-9]*$"},
+          "uniqueItems": true
+        },
+        "new_candidate_ids": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^C[1-9][0-9]*$"},
+          "uniqueItems": true
         }
       }
     },

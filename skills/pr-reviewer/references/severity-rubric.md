@@ -11,13 +11,26 @@ APPROVE  ⇔  ( PR author.login != authenticated GitHub login )
 else      →  DO NOT approve
 ```
 
-So three independent things block approval:
+So three independent things block an approval proposal:
 
-1. A **self-authored PR**. Review it only when the user explicitly targets it or asks to include their own PRs, and publish the result as `COMMENT`; never attempt self-approval.
+1. A **self-authored PR**. Analyze it only when the user explicitly targets it or asks to include their own PRs, and propose `COMMENT`; never attempt self-approval.
 2. **Any** finding in a critical category (`correctness`, `security`, `migration_safety`, `test_coverage`) — even a `nit`.
 3. **Any** `blocker` or `major` finding, in any category.
 
-For PRs authored by someone else, `minor`/`nit` findings in non-critical categories (`architecture`, `error_handling`, `data_layer` non-migration, `scraper`) do **not** block — you approve and leave them inline. On an explicitly requested self-review, the same findings remain non-blocking, but the submission event is still `COMMENT` because of authorship.
+For PRs authored by someone else, `minor`/`nit` findings in non-critical categories (`architecture`, `error_handling`, `data_layer` non-migration, `scraper`) do **not** block an approval proposal. On an explicitly requested self-review, the same findings remain non-blocking, but the proposed event is still `COMMENT` because of authorship. `blocking` is derived from this gate; do not use it to inflate a preference into a risk.
+
+## Materiality boundary
+
+A candidate must identify a plausible, evidence-backed risk to at least one of:
+
+- runtime behavior or correctness;
+- security or authorization;
+- persistent data integrity or query behavior;
+- migration safety;
+- rollout compatibility across deployed versions or repositories; or
+- meaningful regression coverage for changed behavior or a failure path.
+
+Withhold convention-only feedback even when a repository guide prefers it. In particular, do not create candidates for test assertion placement, assertion constants, extracting a one-use helper, or a speculative abstraction that has no demonstrated failure or drift risk. Do not turn “could be cleaner” or “might be reusable later” into an architecture finding. Missing coverage is material only when you can name the changed behavior, boundary, invariant, or failure mode that could regress undetected.
 
 ## Levels
 
@@ -38,21 +51,16 @@ Real bug or significant design break, not necessarily catastrophic, that a user 
 - New visible behavior / new route with zero test coverage (critical category `test_coverage` → blocks regardless).
 
 ### minor
-Maintainability / clarity issue; correct code, worse design. Approves (unless in a critical category).
-- Fat view that should delegate to a service (backend PR 3737).
-- Duplicated `Prefetch`/query logic that should be a shared helper (backend PR 3751).
-- Oversized component that should be split into smaller components (web).
-- Ternary that should be `react-if` (web PR 533).
-- Inline callbacks that should be named `useCallback` (web PR 542).
-- Reimplementing a primitive instead of reusing `Dialog` (web PR 537).
+A localized but evidence-backed defect or regression risk with limited blast radius. It can propose approval only when its category is non-critical.
+- A retry path loses a specific error signal but has a bounded fallback.
+- A query pattern demonstrably adds repeated database work on a bounded path.
+- Rollout compatibility is unclear for one mixed-version edge, with evidence from the changed contract.
 
 ### nit
-Tiny polish; take-it-or-leave-it. Approves (unless in a critical category).
-- Redundant condition the helper already guarantees (`if response_parsed:`) (backend PR 3741).
-- Intermediate variable for a dense ternax for readability (backend PR 3743).
-- Over-`useMemo` on simple derived constants (web PR 526).
-- Unused parameter still in a signature (backend PR 3730).
+The lowest material risk: concrete and worth the author's attention, but narrowly scoped. Do not use `nit` for polish, naming, formatting, a one-use helper, or speculative refactoring; withhold those entirely. A `nit` in a critical category still blocks under the gate, so confirm that the risk is real before retaining it.
 
-## Note on test/architecture findings
+## Test and architecture findings
 
-A `test_coverage` finding blocks **even at `nit`/`minor`** because it's a critical category — e.g. "Assert phase contains a data extraction" (AAA violation) or "magic value in assertion" technically blocks approval. In practice score these as `minor` and let the gate do its job: the PR gets `event=COMMENT`, the comment is friendly, and the human fixes it. Architecture findings are *not* critical, so they only block when they rise to `major` (e.g. fragile path-sniffing middleware that will misroute backend URLs, backend PR 3744 — that's a `major` correctness/architecture risk, not a `minor`).
+A `test_coverage` finding blocks even at `nit`/`minor`, which is why mechanical test preferences must never enter the proposal. Assertion placement and assertion constants are not findings. Retain missing coverage only for a material changed behavior or failure path, and name that risk in the evidence.
+
+Architecture findings are not critical, but they still cross the materiality boundary. A current fragile path-sniffing middleware that demonstrably misroutes backend URLs is material; a speculative abstraction, class extraction, or one-use helper preference is not.

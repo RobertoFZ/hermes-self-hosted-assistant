@@ -3,9 +3,9 @@
 
 Three layers, matching the project skill-creator pattern:
 
-1. Deterministic assertions  - the gate is obeyed exactly (correct event, no
-   merge call ever, Spanish comments, top-level cause iff not approved, valid
-   severity/category tags, expected critical categories present/absent).
+1. Deterministic assertions  - the read-only proposal contract, gate, stable
+   candidate IDs, executable coordinates, materiality boundary, Spanish text,
+   and valid severity/category tags are obeyed exactly.
 2. LLM-as-judge               - comment quality, tone, reason present, concrete
    suggestion, severity correct, no CI-duplicated findings (rubric.md).
 3. Variance                   - run each fixture N>=5 times; report decision
@@ -37,6 +37,7 @@ from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 EVALS_DIR = SKILL_DIR / "references" / "evals"
+POLICY_EVALS_DIR = SKILL_DIR / "evals"
 FIXTURES_DIR = EVALS_DIR / "fixtures"
 
 VALID_EVENTS = {"APPROVE", "COMMENT"}
@@ -72,6 +73,14 @@ ACK_PATTERNS = re.compile(
     r"no lo apruebo todav|aprecio|qué bueno|que bueno|sigue así|sigue asi|🙏|👍)",
     re.IGNORECASE,
 )
+MECHANICAL_PATTERNS = re.compile(
+    r"(assert(?:ion)?\s+(?:phase|placement|constant)|magic\s+(?:value|number)"
+    r"|one[- ]use\s+helper|single[- ]use\s+helper|extract(?:ing)?\s+(?:this\s+)?"
+    r"(?:into|to)\s+(?:a\s+)?helper|speculative\s+abstraction|"
+    r"por\s+claridad\s+(?:podr[ií]as|conviene)\s+extraer)",
+    re.IGNORECASE,
+)
+CANDIDATE_ID = re.compile(r"^C[1-9][0-9]*$")
 
 
 def run_cli(cmd: str, prompt: str) -> str:
@@ -121,11 +130,16 @@ class Fixture:
 
     @classmethod
     def load(cls, path: Path) -> "Fixture":
+        expected = json.loads((path / "expected.json").read_text())
+        overrides_path = POLICY_EVALS_DIR / "expectations.json"
+        if overrides_path.is_file():
+            overrides = json.loads(overrides_path.read_text())
+            expected.update(overrides.get(path.name, {}))
         return cls(
             name=path.name,
             pr=json.loads((path / "pr.json").read_text()),
             diff=(path / "diff.patch").read_text(),
-            expected=json.loads((path / "expected.json").read_text()),
+            expected=expected,
         )
 
 
@@ -134,26 +148,36 @@ def load_skill_bundle() -> str:
     parts = [f"===== SKILL.md =====\n{(SKILL_DIR / 'SKILL.md').read_text()}"]
     for ref in sorted((SKILL_DIR / "references").glob("*.md")):
         parts.append(f"===== references/{ref.name} =====\n{ref.read_text()}")
+    corpus = POLICY_EVALS_DIR / "materiality-corpus.json"
+    if corpus.is_file():
+        parts.append(
+            "===== labeled materiality corpus =====\n"
+            "Apply these labels as policy examples, not as candidate text.\n"
+            + corpus.read_text()
+        )
     return "\n\n".join(parts)
 
 
 def build_review_prompt(bundle: str, fx: Fixture) -> str:
-    return f"""You are the `pr-reviewer` skill. Follow it exactly. This is DRY-RUN /
-eval mode: do NOT call gh, do NOT post anything, do NOT merge. Review the diff
-below and emit ONLY the dry-run output contract (a single fenced ```json block)
+    return f"""You are the `pr-reviewer` skill. Follow it exactly. This is proposal /
+eval mode: do NOT call gh, do NOT post anything, do NOT merge. Analyze the diff
+below and emit ONLY the proposal output contract (a single fenced ```json block)
 described in SKILL.md. No prose before or after the json block.
 
 {bundle}
 
 ===== PR METADATA =====
 repo: {fx.pr['repo']}
+pr_number: {fx.pr['number']}
+head_sha: 0123456789abcdef0123456789abcdef01234567
+baseline_head_sha: null
 title: {fx.pr['title']}
 body: {fx.pr.get('body', '')}
 
 ===== DIFF UNDER REVIEW =====
 {fx.diff}
 
-Now output only the json review object per the dry-run output contract.
+Now output only the json read-only proposal per the proposal output contract.
 """
 
 
@@ -184,7 +208,8 @@ class RunResult:
     def approved(self) -> bool | None:
         if self.review is None:
             return None
-        return bool(self.review.get("approved"))
+        event = self.review.get("event")
+        return event == "APPROVE" if event in VALID_EVENTS else None
 
 
 def deterministic_checks(fx: Fixture, review: dict, raw: str) -> list[str]:
@@ -202,50 +227,99 @@ def deterministic_checks(fx: Fixture, review: dict, raw: str) -> list[str]:
     if event != exp["event"]:
         fails.append(f"event {event!r} != expected {exp['event']!r}")
 
-    approved = review.get("approved")
-    if not isinstance(approved, bool):
-        fails.append("approved must be a boolean")
-    elif approved != exp["approved"]:
-        fails.append(f"approved {approved} != expected {exp['approved']}")
-    if isinstance(approved, bool) and approved != (event == "APPROVE"):
-        fails.append("approved and event disagree")
+    if review.get("published") is not False:
+        fails.append("published must be false; analysis is read-only")
+    if review.get("repo") != fx.pr["repo"]:
+        fails.append(f"repo {review.get('repo')!r} != fixture repo {fx.pr['repo']!r}")
+    if review.get("pr_number") != fx.pr["number"]:
+        fails.append("pr_number does not match fixture")
+    if not isinstance(review.get("head_sha"), str) or len(review["head_sha"]) < 7:
+        fails.append("head_sha must identify the analyzed revision")
+    if review.get("baseline_head_sha") is not None:
+        fails.append("initial fixture proposal must use baseline_head_sha=null")
+    for field_name in ("objective", "summary"):
+        if not str(review.get(field_name, "")).strip():
+            fails.append(f"{field_name} must be a non-empty string")
 
-    comments = review.get("comments") or []
-    if not isinstance(comments, list):
-        fails.append("comments must be a list")
-        comments = []
+    findings = review.get("findings") or []
+    if not isinstance(findings, list):
+        fails.append("findings must be a list")
+        findings = []
 
     categories_found: set[str] = set()
-    for i, c in enumerate(comments):
+    candidate_ids: list[str] = []
+    for i, c in enumerate(findings):
+        prefix = f"finding[{i}]"
+        candidate_id = c.get("candidate_id")
+        if not isinstance(candidate_id, str) or not CANDIDATE_ID.fullmatch(candidate_id):
+            fails.append(f"{prefix} candidate_id {candidate_id!r} invalid")
+        else:
+            candidate_ids.append(candidate_id)
         sev = c.get("severity")
         cat = c.get("category")
         body = c.get("body", "")
         if sev not in VALID_SEVERITIES:
-            fails.append(f"comment[{i}] severity {sev!r} invalid")
+            fails.append(f"{prefix} severity {sev!r} invalid")
         if cat not in VALID_CATEGORIES:
-            fails.append(f"comment[{i}] category {cat!r} invalid")
+            fails.append(f"{prefix} category {cat!r} invalid")
         else:
             categories_found.add(cat)
-        if not str(c.get("path", "")).strip():
-            fails.append(f"comment[{i}] missing path")
         if not SPANISH_HINTS.search(body):
-            fails.append(f"comment[{i}] body does not look like Spanish: {body[:60]!r}")
+            fails.append(f"{prefix} body does not look like Spanish: {body[:60]!r}")
         if re.match(r"\s*(nit|bloqueante|blocker|major|minor)\s*:", body, re.IGNORECASE):
-            fails.append(f"comment[{i}] uses a forbidden severity prefix")
+            fails.append(f"{prefix} uses a forbidden severity prefix")
+        evidence = str(c.get("evidence", ""))
+        if not evidence.strip():
+            fails.append(f"{prefix} missing evidence")
+        if MECHANICAL_PATTERNS.search(f"{body}\n{evidence}"):
+            fails.append(f"{prefix} is mechanical or speculative and must be withheld")
+
+        path = c.get("path")
+        coordinates = ("line", "side", "start_line", "start_side")
+        if isinstance(path, str) and path.strip():
+            if not isinstance(c.get("line"), int) or c["line"] < 1:
+                fails.append(f"{prefix} inline coordinate needs a positive line")
+            if c.get("side") not in {"LEFT", "RIGHT"}:
+                fails.append(f"{prefix} inline coordinate needs LEFT/RIGHT side")
+            has_start_line = c.get("start_line") is not None
+            has_start_side = c.get("start_side") is not None
+            if has_start_line != has_start_side:
+                fails.append(f"{prefix} start_line/start_side must be paired")
+            if has_start_line and (
+                not isinstance(c["start_line"], int)
+                or c["start_line"] < 1
+                or c["start_side"] not in {"LEFT", "RIGHT"}
+            ):
+                fails.append(f"{prefix} has invalid range coordinates")
+        elif path is None:
+            if any(c.get(name) is not None for name in coordinates):
+                fails.append(f"{prefix} non-inline coordinates must all be null")
+        else:
+            fails.append(f"{prefix} path must be a non-empty string or null")
+
+        should_block = cat in CRITICAL_CATEGORIES or sev in {"blocker", "major"}
+        if c.get("blocking") is not should_block:
+            fails.append(f"{prefix} blocking must be {should_block}")
+
+    if len(candidate_ids) != len(set(candidate_ids)):
+        fails.append("candidate_id values must be unique")
+    expected_ids = [f"C{i}" for i in range(1, len(findings) + 1)]
+    if candidate_ids != expected_ids:
+        fails.append(f"candidate IDs must be stable sequential order {expected_ids}")
 
     # A "blocking" finding: critical category at any severity, or blocker/major anywhere.
     blocking = [
         c
-        for c in comments
+        for c in findings
         if c.get("category") in CRITICAL_CATEGORIES
         or c.get("severity") in {"blocker", "major"}
     ]
 
     # Gate self-consistency: APPROVE requires zero blocking findings.
     gate_should_approve = len(blocking) == 0
-    if isinstance(approved, bool) and approved != gate_should_approve:
+    if event in VALID_EVENTS and (event == "APPROVE") != gate_should_approve:
         fails.append(
-            f"gate violation: approved={approved} but {len(blocking)} blocking "
+            f"gate violation: event={event} but {len(blocking)} blocking "
             f"finding(s) present "
             f"(critical={sorted(categories_found & CRITICAL_CATEGORIES)})"
         )
@@ -254,33 +328,18 @@ def deterministic_checks(fx: Fixture, review: dict, raw: str) -> list[str]:
     if min_blocking is not None and len(blocking) < min_blocking:
         fails.append(f"{len(blocking)} blocking findings < expected min {min_blocking}")
 
-    # Top-level comment: present ONLY when not approved AND more than one blocking finding;
-    # absent otherwise. When present it must be terse Spanish with no acknowledgments/filler.
-    cause = review.get("top_level_comment")
-    has_cause = isinstance(cause, str) and bool(cause.strip())
-    should_have_cause = (not approved) and len(blocking) > 1
-
-    if should_have_cause != exp["cause_required"]:
-        fails.append(
-            f"cause-branch mismatch: review implies should_have_cause={should_have_cause} "
-            f"(approved={approved}, blocking={len(blocking)}) but fixture expects "
-            f"cause_required={exp['cause_required']}"
-        )
-    if has_cause and not should_have_cause:
-        fails.append(
-            "top_level_comment present but not warranted "
-            f"(approved={approved}, blocking={len(blocking)} — need >1 blocking)"
-        )
-    if should_have_cause and not has_cause:
-        fails.append("more than one blocking finding requires a top_level_comment")
-    if has_cause and should_have_cause:
-        if not SPANISH_HINTS.search(cause):
-            fails.append(f"top_level_comment not Spanish: {cause[:60]!r}")
-        if ACK_PATTERNS.search(cause):
-            fails.append(f"top_level_comment has acknowledgment/filler: {cause[:80]!r}")
-        needles = exp.get("cause_must_mention_any")
-        if needles and not any(n.lower() in cause.lower() for n in needles):
-            fails.append(f"cause comment mentions none of {needles}")
+    delta = review.get("delta")
+    if not isinstance(delta, dict):
+        fails.append("delta must be an object")
+    else:
+        if delta.get("status") != "initial":
+            fails.append("initial fixture proposal must use delta.status=initial")
+        if delta.get("addressed_candidate_ids") != []:
+            fails.append("initial proposal cannot have addressed candidate IDs")
+        if delta.get("still_open_candidate_ids") != []:
+            fails.append("initial proposal cannot have still-open candidate IDs")
+        if delta.get("new_candidate_ids") != candidate_ids:
+            fails.append("delta.new_candidate_ids must list every initial candidate")
 
     for cat in exp.get("must_find_categories", []):
         if cat not in categories_found:
@@ -289,10 +348,10 @@ def deterministic_checks(fx: Fixture, review: dict, raw: str) -> list[str]:
         if cat in categories_found:
             fails.append(f"unexpected finding in critical category {cat!r}")
 
-    if "min_comments" in exp and len(comments) < exp["min_comments"]:
-        fails.append(f"{len(comments)} comments < min {exp['min_comments']}")
-    if "max_comments" in exp and len(comments) > exp["max_comments"]:
-        fails.append(f"{len(comments)} comments > max {exp['max_comments']}")
+    if "min_comments" in exp and len(findings) < exp["min_comments"]:
+        fails.append(f"{len(findings)} findings < min {exp['min_comments']}")
+    if "max_comments" in exp and len(findings) > exp["max_comments"]:
+        fails.append(f"{len(findings)} findings > max {exp['max_comments']}")
 
     return fails
 
@@ -320,7 +379,7 @@ def evaluate_fixture(
                 judge = {"overall": None, "notes": f"judge error: {exc}"}
         results.append(RunResult(review=review, raw=raw, det_failures=det, judge=judge))
         status = "ok" if not det else f"DET-FAIL({len(det)})"
-        decision = "APPROVE" if review.get("approved") else "COMMENT"
+        decision = review.get("event", "INVALID")
         score = (judge or {}).get("overall") if judge else None
         print(f"    run {n + 1}/{runs}: {decision} {status}"
               + (f" judge={score}" if score is not None else ""))
@@ -370,7 +429,8 @@ def main() -> int:
     judge_cmd = None if args.no_judge else (args.judge_cmd or os.environ.get("JUDGE_CMD", default_cmd))
 
     bundle = load_skill_bundle()
-    rubric = (EVALS_DIR / "rubric.md").read_text()
+    policy_rubric = POLICY_EVALS_DIR / "rubric.md"
+    rubric = (policy_rubric if policy_rubric.is_file() else EVALS_DIR / "rubric.md").read_text()
 
     fixture_dirs = sorted(p for p in FIXTURES_DIR.iterdir() if p.is_dir())
     if args.fixture:
