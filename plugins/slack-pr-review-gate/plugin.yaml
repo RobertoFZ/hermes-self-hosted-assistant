@@ -1,6 +1,6 @@
 name: slack-pr-review-gate
 kind: standalone
-version: 1.2.0
-description: Restrict configured Slack reviewers to approved GitHub PR URLs.
+version: 2.0.0
+description: Route approved GitHub PR requests through private owner confirmation.
 hooks:
   - pre_gateway_dispatch
