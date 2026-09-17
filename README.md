@@ -5,7 +5,7 @@ review assistant. It uses the Hermes agent runtime with the `openai-codex`
 provider and interactive ChatGPT/Codex OAuth; it does not require an
 `OPENAI_API_KEY`.
 
-The repository owns its Codex workflow skills, two Hermes orchestration skills,
+The repository owns its Codex workflow skills, three Hermes orchestration skills,
 the pinned Compound Engineering plugin configuration, the persisted
 review-history schema, the daily digest definition, and the Slack review-only
 policy. Every installation supplies its own credentials and Slack identifiers
@@ -17,10 +17,13 @@ through ignored runtime files.
 - Pinned standalone Codex CLI with its own persistent ChatGPT OAuth
 - Pinned Paseo daemon and web UI for using that Codex CLI remotely
 - Hermes-to-Paseo delegation of exact PR review requests
-- GitHub CLI OAuth for reading PRs and publishing `APPROVE` or `COMMENT`
-- SQLite history containing only Hermes-initiated, GitHub-verified reviews
+- GitHub CLI OAuth for read-only proposal analysis and explicitly confirmed
+  `APPROVE` or `COMMENT` actions
+- SQLite schema v3 history for requests, private proposals, decisions, delivery
+  receipts, reminders, and GitHub-verified publications
 - Linear issue snapshots and normalized findings for later analysis
-- Daily Slack DM digest at 17:00 in `America/Mexico_City`
+- Private Slack PR threads, bounded reminders, and a daily DM digest at 17:00
+  in `America/Mexico_City`
 - Pinned OpenSpec CLI for strict validation of specification changes
 - Compound Engineering `3.24.0` installed into the persistent Codex profile
 - Vendored `writing-for-agents` and explicit-only experimental `retro` skills
@@ -65,7 +68,7 @@ Important runtime locations:
 | Managed Hermes cron IDs | `/opt/data/cron/repository-managed-jobs.json` | Never |
 | Repository-managed Codex skills | `skills/{codex-self-review,pr-reviewer,pr-decision-review,writing-for-agents,retro}` | Yes |
 | Compound Engineering plugin cache and registration | `/opt/data/.codex` | Never |
-| Hermes orchestration skills | `skills/codex-pr-review`, `skills/review-digest` | Yes |
+| Hermes orchestration skills | `skills/{codex-pr-review,review-digest,review-reminder}` | Yes |
 | Cron source of truth | `config/crons.json` | Yes |
 
 The OAuth stores are independent. Hermes uses `/opt/data/auth.json`; the
@@ -96,11 +99,24 @@ SLACK_REVIEW_BOT_USER_IDS=TRUSTED_REVIEW_BOT_ID
 SLACK_REVIEW_COMPETING_BOT_USER_IDS=NACHO_BOT_ID
 SLACK_REVIEW_CHANNEL_ID=CHANNEL_ID
 SLACK_REVIEW_DIGEST_USER_ID=OWNER_ID
+SLACK_REVIEW_MAX_URLS_PER_MESSAGE=5
+SLACK_REVIEW_MAX_ACTIVE_PER_REQUESTER=5
+SLACK_REVIEW_MAX_QUEUED=50
+SLACK_REVIEW_PROPOSAL_CONCURRENCY=3
 TZ=America/Mexico_City
 ```
 
 `SLACK_REVIEW_DIGEST_USER_ID` may be left blank when exactly one owner is
-configured; cron synchronization uses that owner as the digest recipient.
+configured; that single owner becomes both the private decision owner and the
+digest recipient. If it is set, it must name one member of
+`SLACK_REVIEW_OWNER_USER_IDS`. Policy application, cron synchronization, and
+deployment verification fail closed for a missing, ambiguous, or non-owner
+decision owner.
+
+The four queue values bound URLs per Slack message, active requests per sender,
+all queued-plus-running proposals, and simultaneous Codex analyses. They must be
+positive integers. Repeated work for the same repository and PR is coalesced by
+the persisted workflow and does not create another private conversation.
 
 The repository and submodule defaults are already declared in the example.
 `SLACK_ALLOWED_USERS` must contain the owner, every delegated reviewer, and
@@ -257,86 +273,153 @@ The Slack policy behaves as follows:
   reviewed only when a configured Slack owner mentions the Hermes bot in the
   same message. Other PRs in a mixed message continue normally.
 - Unsupported URLs or unrelated instructions are discarded before inference.
-- Accepted requests get one immediate validation acknowledgement; tool progress
-  remains hidden and Hermes posts exactly one final result.
+- An accepted request has a reaction-only pending state. Hermes sends no
+  automatic public acknowledgement or final response.
+- Each requested PR gets one top-level DM summary for the decision owner; its
+  questions, proposal changes, reminders, re-reviews, and action stay in that
+  message thread.
+- After the first terminal outcome, the original request thread gets one
+  compact verdict message. The gate edits that message as sibling PRs finish
+  instead of posting another message.
 
-## Review delegation and persistence
+## Private review confirmation
 
-Hermes does not discover or execute `pr-reviewer`. The skill is mounted only in
-Codex's user skill directory inside the Paseo service. The path for a Slack
-review is:
+Hermes does not publish a Codex review directly. `pr-reviewer` is mounted only
+in Codex's user skill directory inside Paseo and always returns a read-only,
+head-bound proposal. The path for a Slack request is:
 
 ```text
 Slack request
-  -> Hermes codex-pr-review
-  -> deterministic review automation
-  -> Paseo run
-  -> Codex $pr-reviewer
-  -> GitHub APPROVE or COMMENT
-  -> GitHub reconciliation
-  -> SQLite verified history
+  -> reaction-only pending state
+  -> SQLite request and PR conversation
+  -> Paseo / Codex $pr-reviewer read-only proposal
+  -> one top-level DM per PR
+  -> exact owner command in that DM thread
+  -> current-head guard and deterministic GitHub action
+  -> one compact verdict in the original request thread
 ```
 
-This leaves the existing `pr-reviewer` instructions unchanged. You can still
-invoke `$pr-reviewer` manually in Codex for a local, pre-PR review; it is not
-automatically attached to `ship` or PR creation. Those direct Codex reviews are
-not imported into the Hermes digest.
+The proposal identifies the repository and PR, exact head SHA, objective,
+suggested decision, and material candidate comments with stable IDs. Assertion
+placement, assertion constants, one-use helper extraction, and speculative
+abstraction advice are withheld. Ask ordinary questions in the DM thread;
+ordinary language is read-only. Only these exact, revision-bound commands
+mutate a proposal or authorize a GitHub action:
 
-For a Hermes request, the automation validates the exact URL and repository
-allowlist, records the PR head SHA, checks for an existing current-head review,
-launches one structured Codex run per PR, and then checks GitHub again. A Codex
-response is persisted as successful only when a new review or inline comment by
-the authenticated reviewer exists on the same head SHA. An atomic SQLite claim
-allows only one in-progress run per PR head and reviewer; duplicate Slack
-requests reuse that run instead of launching another Codex agent. Each delegated
-review agent receives a unique automation-run label and is hard-deleted after
-GitHub reconciliation, whether the review succeeds or fails. Cleanup validates
-Paseo's deleted agent ID and count, then confirms the label no longer resolves.
-Its outcome and error are persisted independently from the review result, so a
-successful GitHub publication remains successful even when session deletion
-must be retried. Duplicate requests and the daily digest retry pending cleanup.
+```text
+approve Pn
+publish Pn Cn [Cn ...]
+skip Pn
+edit Pn Cn: replacement text
+dismiss Pn Cn [Cn ...]
+```
 
-If Hermes is interrupted after GitHub publication but before persistence, a
-later duplicate request recovers terminal structured output from the labeled
-Paseo agent, verifies the publication, persists the original run, and removes
-the agent. An operator can recover a known interrupted run immediately with:
+Replace `Pn` and `Cn` with the visible revision and candidate IDs. A missing,
+stale, or inactive revision is rejected. `edit` and `dismiss` change only the
+private draft. `approve` and `publish` re-read the PR identity and head before
+writing. Approval is never offered for a self-authored PR, and it is disabled
+unless branch protection proves that stale approvals are dismissed; this keeps
+a head race from satisfying a merge requirement with an obsolete approval.
+
+If a new commit arrives, every command for the old revision becomes stale. The
+same DM conversation receives a re-review from the exact prior head to the new
+head, with addressed, still-open, and new findings separated. A force-push that
+removes the baseline produces a full current-head proposal labeled
+`delta unavailable`; it still requires a new command.
+
+An unanswered proposal gets a private thread reminder after two working hours,
+counted Monday-Friday from 09:00 to 18:00 in `TZ`. It gets one final reminder at
+09:00 on the next working day and then appears only in the daily private digest.
+No reminder timeout can approve, publish, skip, create another top-level DM, or
+post a public reminder. The recovery sweep may create the original top-level DM
+only when analysis finished but its first summary was never sent.
+
+### Recovery and privacy boundary
+
+SQLite is authoritative; Slack messages and reactions are projections. A lost
+Slack receipt is searched only in the exact DM/thread using its workflow key.
+If the send cannot be proven present or absent, the delivery becomes
+`operator-blocked`: inspect that exact destination and the Hermes logs, then
+resolve the stored receipt deliberately. Do not replay the request, delete the
+row, or post the private proposal in the review channel. A verdict edit failure
+also never falls back to a second public verdict.
+
+If a restart strands completed analysis before its first Slack summary, the
+reminder sweep resumes that proposal and sends the summary once to the
+configured decision owner. Its receipt establishes the same stable PR thread
+that normal intake would have created; it never uses the source channel or cron
+delivery target.
+
+GitHub actions are commit-bound and reconciled by their publication receipts.
+When a private result says `recovery_required`, fix the reported GitHub/auth
+problem and send the same exact revision command again; idempotency and verified
+receipts prevent already-confirmed comments from being duplicated. A head
+mismatch starts re-review instead of recovery. The legacy run-recovery commands
+remain available for older publish-first records:
 
 ```bash
 make review-recover RUN_ID=REVIEW_RUN_UUID
-```
-
-The recovery falls back to GitHub publication data only when the structured
-Paseo result is unavailable and records that limitation in review history. If
-the agent has finished but recovery continues to report `in_progress`, retry
-with `FORCE=1`; this explicitly permits fallback recovery and deletion of an
-agent Paseo still reports as active.
-
-Reconcile every pending terminal session, or one known run, without changing
-review outcomes:
-
-```bash
+make review-recover RUN_ID=REVIEW_RUN_UUID FORCE=1
 make review-cleanup
 make review-cleanup RUN_ID=REVIEW_RUN_UUID
 ```
 
-Each successful record includes the review result and summary, normalized
-findings and severities, a snapshot of the related Linear issue when available,
-and the verified GitHub publication IDs. Preview the raw digest input with:
+Private objective, evidence, candidate text, questions, edits, reminders, and
+errors stay in the owner's DM thread and SQLite. The review channel receives
+only the pending reaction and, after a terminal outcome exists, the single
+compact verdict containing PR identity, outcome, reviewed head, and published
+comment count. The database lives in `hermes-data`, so normal volume backup and
+restore includes the workflow audit trail.
+
+Preview the daily digest input with:
 
 ```bash
 make digest-preview
 ```
 
-The SQLite database is part of `hermes-data`, so the existing volume backup and
-restore commands include it automatically.
+### Quality and smoke verification
+
+Run the local policy/state-machine suite first, then the deployed integration
+check after `make restart` and `make sync-crons`:
+
+```bash
+make test
+make verify
+```
+
+The labeled audit boundary is committed in
+`skills/pr-reviewer/evals/materiality-corpus.json`. Deployment verification
+checks that the mounted corpus still contains both `withhold` and `retain`
+examples and that the eval harness consumes it. Run the full model-backed replay
+when changing reviewer policy:
+
+```bash
+cd skills/pr-reviewer
+python3 scripts/eval.py --runs 5
+```
+
+Manual Slack/GitHub smoke test on allowlisted test PRs:
+
+1. Send one channel request containing two PR URLs. Confirm only the pending
+   reaction is public and two separate DM roots arrive.
+2. Ask a question in one DM thread, then run `edit Pn Cn: replacement text` and
+   `publish Pn Cn`. Confirm GitHub contains only that edited current-head
+   comment.
+3. Push a commit to the other PR, try its old command, and confirm rejection
+   plus a delta summary in the existing thread. Decide using the new revision.
+4. Confirm the source thread contains one compact verdict that was edited as
+   the two PRs completed. Confirm no private analysis or reminder appeared in
+   the channel.
 
 ## Repository-managed cron jobs
 
 All schedules live in the single committed file
 [`config/crons.json`](config/crons.json). It stores the cron expression together
 with the Hermes skill, prompt, delivery target, and working directory. The
-default daily digest is `0 17 * * *`; with `TZ=America/Mexico_City`, it runs at
-17:00 Mexico City local time throughout the year.
+private reminder sweep runs every 15 minutes and returns `NO_REPLY` so the cron
+delivery target never receives a fallback message. The daily digest is
+`0 17 * * *`; with `TZ=America/Mexico_City`, it runs at 17:00 Mexico City local
+time throughout the year and includes proposals that exhausted both reminders.
 
 After editing the file or changing its environment variables, recreate Hermes
 when the timezone changed and reconcile the definitions:

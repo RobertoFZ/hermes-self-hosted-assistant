@@ -1,0 +1,12 @@
+[
+  {"label": "withhold", "pattern": "AAA assertion placement only"},
+  {"label": "withhold", "pattern": "literal assertion constant with no behavioral ambiguity"},
+  {"label": "withhold", "pattern": "extract a helper used once"},
+  {"label": "withhold", "pattern": "introduce an abstraction for a hypothetical future consumer"},
+  {"label": "retain", "category": "correctness", "pattern": "changed runtime path violates a demonstrated invariant"},
+  {"label": "retain", "category": "security", "pattern": "authorization or tenant scope is bypassed"},
+  {"label": "retain", "category": "data_layer", "pattern": "partial failure can corrupt or strand persisted state"},
+  {"label": "retain", "category": "migration_safety", "pattern": "migration can block writes or lose data"},
+  {"label": "retain", "category": "correctness", "pattern": "mixed-version rollout breaks a deployed contract"},
+  {"label": "retain", "category": "test_coverage", "pattern": "changed material behavior or failure path can regress undetected"}
+]

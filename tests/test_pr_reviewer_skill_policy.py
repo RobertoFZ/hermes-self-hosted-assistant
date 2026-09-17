@@ -1,4 +1,5 @@
 import unittest
+import json
 from pathlib import Path
 
 
@@ -18,9 +19,59 @@ SEVERITY_RUBRIC = (
 LOCAL_WORKFLOW = (
     ROOT / "skills" / "pr-reviewer" / "references" / "local-branch-workflow.md"
 ).read_text(encoding="utf-8")
+REVIEW_RESULT_SCHEMA = json.loads(
+    (ROOT / "automation" / "review-result.schema.json").read_text(encoding="utf-8")
+)
 
 
 class PRReviewerSkillPolicyTests(unittest.TestCase):
+    def test_github_review_mode_is_read_only_until_owner_confirmation(self):
+        for content in (SKILL, WORKFLOW):
+            self.assertIn("read-only proposal", content)
+            self.assertIn("published", content)
+            self.assertIn("false", content)
+            self.assertIn("explicit owner confirmation", content)
+        self.assertNotIn("Publish GitHub reviews immediately", SKILL)
+        self.assertNotIn("Publish by default", WORKFLOW)
+
+    def test_materiality_boundary_withholds_mechanical_and_speculative_comments(self):
+        for content in (SKILL, WORKFLOW, SEVERITY_RUBRIC):
+            self.assertIn("assertion placement", content)
+            self.assertIn("assertion constants", content)
+            self.assertIn("one-use helper", content)
+            self.assertIn("speculative abstraction", content)
+        self.assertIn("persistent data", SEVERITY_RUBRIC)
+        self.assertIn("rollout compatibility", SEVERITY_RUBRIC)
+        self.assertIn("meaningful regression", SEVERITY_RUBRIC)
+
+    def test_proposals_assign_stable_candidate_ids_and_executable_coordinates(self):
+        for content in (SKILL, WORKFLOW):
+            self.assertIn("candidate_id", content)
+            self.assertIn("Never renumber", content)
+            self.assertIn("start_side", content)
+        finding = REVIEW_RESULT_SCHEMA["properties"]["findings"]["items"]
+        self.assertIn("candidate_id", finding["required"])
+        self.assertEqual(finding["properties"]["candidate_id"]["pattern"], r"^C[1-9][0-9]*$")
+        for field in ("path", "line", "side", "start_line", "start_side"):
+            self.assertIn(field, finding["required"])
+
+    def test_proposal_delta_distinguishes_addressed_open_and_new_findings(self):
+        for content in (SKILL, WORKFLOW):
+            self.assertIn("addressed_candidate_ids", content)
+            self.assertIn("still_open_candidate_ids", content)
+            self.assertIn("new_candidate_ids", content)
+        delta = REVIEW_RESULT_SCHEMA["properties"]["delta"]
+        self.assertEqual(
+            set(delta["required"]),
+            {
+                "status",
+                "summary",
+                "addressed_candidate_ids",
+                "still_open_candidate_ids",
+                "new_candidate_ids",
+            },
+        )
+
     def test_scratch_artifacts_stay_inside_hermes_safe_root(self):
         for content in (SKILL, WORKFLOW, GH_RUNBOOK):
             self.assertIn("/opt/data/pr-reviewer-tmp", content)
