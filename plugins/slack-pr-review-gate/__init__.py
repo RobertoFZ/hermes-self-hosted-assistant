@@ -203,6 +203,20 @@ def _slack_primary_text(event: Any) -> str:
     return str(getattr(event, "text", "") or "")
 
 
+def _slack_command_text(event: Any) -> str:
+    text = _slack_primary_text(event).strip()
+    if (
+        len(text) >= 2
+        and text.startswith("`")
+        and text.endswith("`")
+        and "`" not in text[1:-1]
+        and "\n" not in text[1:-1]
+        and "\r" not in text[1:-1]
+    ):
+        return text[1:-1].strip()
+    return text
+
+
 def _has_bot_review_intent(text: str) -> bool:
     normalized = unicodedata.normalize("NFKD", text or "")
     folded = "".join(char for char in normalized if not unicodedata.combining(char))
@@ -744,7 +758,7 @@ async def _run_owner_command(adapter: Any, source: Any, event: Any) -> None:
     channel_id = str(getattr(source, "chat_id", "") or "")
     thread_ts = str(getattr(source, "thread_id", "") or "")
     message_ts = str(getattr(event, "message_id", "") or "")
-    command_text = _slack_primary_text(event).strip()
+    command_text = _slack_command_text(event)
     try:
         result = await asyncio.to_thread(
             automation.decide_thread_command,
@@ -855,7 +869,7 @@ def _review_only_policy(event: Any, gateway: Any = None, **_kwargs: Any):
     if user_id == DECISION_OWNER_USER_ID and is_direct_message:
         route = _lookup_private_route(source)
         if route is not None:
-            if _is_exact_command(_slack_primary_text(event)):
+            if _is_exact_command(_slack_command_text(event)):
                 _schedule_owner_command(gateway, source, event)
                 return {"action": "skip", "reason": "review-command-scheduled"}
             return _private_question_rewrite(source, event, route)
