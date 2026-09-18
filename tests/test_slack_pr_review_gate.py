@@ -409,14 +409,14 @@ class SlackReviewPolicyTests(unittest.TestCase):
         with patch.object(self.plugin, "_lookup_private_route", return_value=None):
             self.assertIsNone(self.plugin._review_only_policy(request))
 
-    def test_exact_owner_command_is_handled_in_background(self):
+    def test_inline_code_owner_command_is_handled_in_background(self):
         request = event(
             "U_OWNER",
             "D_OWNER",
-            "approve P2",
+            "`approve P2`",
             raw_message={
                 "type": "message",
-                "text": "approve P2",
+                "text": "`approve P2`",
                 "thread_ts": "100.2",
                 "blocks": [
                     {
@@ -426,7 +426,11 @@ class SlackReviewPolicyTests(unittest.TestCase):
                             {
                                 "type": "rich_text_section",
                                 "elements": [
-                                    {"type": "text", "text": "approve P2"}
+                                    {
+                                        "type": "text",
+                                        "text": "approve P2",
+                                        "style": {"code": True},
+                                    }
                                 ],
                             },
                             {
@@ -462,20 +466,20 @@ class SlackReviewPolicyTests(unittest.TestCase):
             result = self.plugin._review_only_policy(request, gateway=gateway())
         self.assertEqual(result["action"], "skip")
         self.assertEqual(result["reason"], "review-command-scheduled")
-        self.assertEqual(self.plugin._slack_primary_text(request), "approve P2")
+        self.assertEqual(self.plugin._slack_command_text(request), "approve P2")
         searchable_content = self.plugin._slack_message_content(request)
         self.assertIn("Visible attachment", searchable_content)
         self.assertNotIn("approve P3", searchable_content)
         self.assertNotIn("approve P4", searchable_content)
         scheduled.assert_called_once()
 
-    def test_owner_command_passes_only_primary_text_to_automation(self):
+    def test_owner_command_passes_normalized_primary_text_to_automation(self):
         request = event(
             "U_OWNER",
             "D_OWNER",
-            "approve P2",
+            "`approve P2`",
             raw_message={
-                "text": "approve P2",
+                "text": "`approve P2`",
                 "thread_ts": "100.2",
                 "blocks": [
                     {
@@ -524,6 +528,28 @@ class SlackReviewPolicyTests(unittest.TestCase):
         self.assertTrue(self.plugin._is_exact_command("publish P2 C1 C3"))
         self.assertFalse(self.plugin._is_exact_command("publish P2 C1 C1"))
         self.assertFalse(self.plugin._is_exact_command("please approve P2"))
+
+    def test_command_normalization_accepts_only_one_inline_code_wrapper(self):
+        def normalized(text):
+            request = event(
+                "U_OWNER",
+                "D_OWNER",
+                text,
+                raw_message={"text": text},
+            )
+            return self.plugin._slack_command_text(request)
+
+        self.assertEqual(normalized("`approve P2`"), "approve P2")
+        for rejected in (
+            "``approve P2``",
+            "`approve P2",
+            "`approve P2` please",
+            "`approve `P2`",
+            "`approve P2\n`",
+        ):
+            with self.subTest(text=rejected):
+                self.assertEqual(normalized(rejected), rejected)
+                self.assertFalse(self.plugin._is_exact_command(normalized(rejected)))
 
     def test_three_pr_request_schedules_one_private_summary_each_without_public_text(self):
         request = event(
