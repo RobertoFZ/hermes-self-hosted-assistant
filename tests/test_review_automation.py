@@ -853,13 +853,106 @@ class ReviewAutomationTests(unittest.TestCase):
         self.assertEqual(published["re_review"]["revision_token"], "P2")
         re_review.assert_called_once()
 
-    def test_stale_head_and_unsafe_or_self_approval_never_write(self):
-        cases = (
-            ("b" * 40, "developer", True, "stale_head"),
-            ("a" * 40, "developer", False, "stale approvals"),
-            ("a" * 40, "review-bot", True, "self-authored"),
+    def test_approval_uses_reviewed_head_without_branch_protection_lookup(self):
+        expected_head = "a" * 40
+        current_pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/42",
+            repo="acme/api",
+            number=42,
+            title="Fix persisted prices",
+            body="",
+            head_sha=expected_head,
+            base_ref="main",
+            author_login="developer",
         )
-        for current_head, author, safe, expected in cases:
+        newer_pr = automation.PullRequest(
+            **{**current_pr.__dict__, "head_sha": "b" * 40}
+        )
+        posted_payload = {}
+
+        def github_write(method, path, payload):
+            self.assertEqual(method, "POST")
+            self.assertEqual(path, "repos/acme/api/pulls/42/reviews")
+            posted_payload.update(payload)
+            return {"id": 201}
+
+        def publications(_pr, _login):
+            if not posted_payload:
+                return {"reviews": [], "comments": []}
+            return {
+                "reviews": [
+                    {
+                        "id": 201,
+                        "user": {"login": "review-bot"},
+                        "commit_id": expected_head,
+                        "state": "APPROVED",
+                        "body": posted_payload["body"],
+                        "html_url": "https://github.com/acme/api/pull/42#pullrequestreview-201",
+                    }
+                ],
+                "comments": [],
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                self._ready_proposal(db, head_sha=expected_head)
+                with patch.object(
+                    automation, "load_pr", side_effect=[current_pr, newer_pr]
+                ), patch.object(
+                    automation, "reviewer_login", return_value="review-bot"
+                ), patch.object(
+                    automation, "github_publications", side_effect=publications
+                ), patch.object(
+                    automation, "github_json_request", side_effect=github_write
+                ) as github_request, patch.object(
+                    automation,
+                    "gh_json",
+                    side_effect=AssertionError("branch protection must not be read"),
+                ), patch.object(
+                    automation,
+                    "re_review_current_head",
+                    return_value={
+                        "status": "awaiting_decision",
+                        "revision_token": "P2",
+                        "head_sha": newer_pr.head_sha,
+                    },
+                ) as re_review:
+                    approved = automation.execute_thread_command(
+                        db,
+                        workspace_id="T1",
+                        dm_channel_id="D1",
+                        thread_ts="1720000000.000100",
+                        owner_user_id="U_OWNER",
+                        command_text="approve P1",
+                        idempotency_key="msg-approve",
+                    )
+                    replayed = automation.execute_thread_command(
+                        db,
+                        workspace_id="T1",
+                        dm_channel_id="D1",
+                        thread_ts="1720000000.000100",
+                        owner_user_id="U_OWNER",
+                        command_text="approve P1",
+                        idempotency_key="msg-approve",
+                    )
+
+        self.assertEqual(posted_payload["commit_id"], expected_head)
+        self.assertEqual(posted_payload["event"], "APPROVE")
+        self.assertEqual(approved["status"], "completed")
+        self.assertEqual(approved["receipt"]["head_sha"], expected_head)
+        self.assertTrue(approved["receipt"]["head_changed_after_write"])
+        self.assertEqual(approved["re_review"]["head_sha"], newer_pr.head_sha)
+        self.assertEqual(replayed["status"], "completed")
+        github_request.assert_called_once()
+        re_review.assert_called_once()
+
+    def test_stale_head_and_self_approval_never_write(self):
+        cases = (
+            ("b" * 40, "developer", "stale_head"),
+            ("a" * 40, "review-bot", "self-authored"),
+        )
+        for current_head, author, expected in cases:
             with self.subTest(expected=expected), tempfile.TemporaryDirectory() as directory:
                 database = Path(directory) / "reviews.sqlite3"
                 with automation.connect_db(database) as db:
@@ -879,7 +972,9 @@ class ReviewAutomationTests(unittest.TestCase):
                     ), patch.object(
                         automation, "reviewer_login", return_value="review-bot"
                     ), patch.object(
-                        automation, "approval_dismisses_stale_reviews", return_value=safe
+                        automation,
+                        "github_publications",
+                        return_value={"reviews": [], "comments": []},
                     ), patch.object(
                         automation, "github_json_request"
                     ) as github_write:
@@ -895,6 +990,85 @@ class ReviewAutomationTests(unittest.TestCase):
 
                 self.assertIn(expected, result.get("reason", result["status"]))
                 github_write.assert_not_called()
+
+    def test_stale_retry_reconciles_approval_for_reviewed_head_before_rereview(self):
+        expected_head = "a" * 40
+        current_pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/42",
+            repo="acme/api",
+            number=42,
+            title="Fix persisted prices",
+            body="",
+            head_sha="b" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, proposal, _ = self._ready_proposal(
+                    db, head_sha=expected_head
+                )
+                decision_id, _ = automation.record_proposal_decision(
+                    db,
+                    conversation_id=conversation_id,
+                    revision_token=proposal["revision_token"],
+                    owner_user_id="U_OWNER",
+                    action="approve",
+                    idempotency_key="msg-recover-approval",
+                )
+                action_id = db.execute(
+                    "SELECT id FROM workflow_actions WHERE decision_id = ?",
+                    (decision_id,),
+                ).fetchone()[0]
+                approval = {
+                    "id": 201,
+                    "user": {"login": "review-bot"},
+                    "commit_id": expected_head,
+                    "state": "APPROVED",
+                    "body": automation.action_marker(action_id),
+                    "html_url": "https://github.com/acme/api/pull/42#pullrequestreview-201",
+                }
+
+                def publications(pr, login):
+                    self.assertEqual(pr.head_sha, expected_head)
+                    self.assertEqual(login, "review-bot")
+                    return {"reviews": [approval], "comments": []}
+
+                with patch.object(
+                    automation, "load_pr", return_value=current_pr
+                ), patch.object(
+                    automation, "reviewer_login", return_value="review-bot"
+                ), patch.object(
+                    automation, "github_publications", side_effect=publications
+                ) as github_reads, patch.object(
+                    automation, "github_json_request"
+                ) as github_write, patch.object(
+                    automation,
+                    "re_review_current_head",
+                    return_value={
+                        "status": "awaiting_decision",
+                        "revision_token": "P2",
+                        "head_sha": current_pr.head_sha,
+                    },
+                ) as re_review:
+                    recovered = automation.execute_thread_command(
+                        db,
+                        workspace_id="T1",
+                        dm_channel_id="D1",
+                        thread_ts="1720000000.000100",
+                        owner_user_id="U_OWNER",
+                        command_text="approve P1",
+                        idempotency_key="msg-recover-approval",
+                    )
+
+        self.assertEqual(recovered["status"], "completed")
+        self.assertEqual(recovered["receipt"]["head_sha"], expected_head)
+        self.assertTrue(recovered["receipt"]["head_changed_after_write"])
+        self.assertEqual(recovered["re_review"]["head_sha"], current_pr.head_sha)
+        github_reads.assert_called_once()
+        github_write.assert_not_called()
+        re_review.assert_called_once()
 
     def test_existing_database_migrates_cleanup_state(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1438,6 +1612,12 @@ class ReviewAutomationTests(unittest.TestCase):
                 )
                 with patch.object(
                     automation, "load_pr", side_effect=[pr, pr]
+                ), patch.object(
+                    automation, "reviewer_login", return_value="review-bot"
+                ), patch.object(
+                    automation,
+                    "github_publications",
+                    return_value={"reviews": [], "comments": []},
                 ), patch.object(
                     automation,
                     "github_compare_context",

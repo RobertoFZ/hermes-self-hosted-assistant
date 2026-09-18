@@ -317,9 +317,11 @@ dismiss Pn Cn [Cn ...]
 Replace `Pn` and `Cn` with the visible revision and candidate IDs. A missing,
 stale, or inactive revision is rejected. `edit` and `dismiss` change only the
 private draft. `approve` and `publish` re-read the PR identity and head before
-writing. Approval is never offered for a self-authored PR, and it is disabled
-unless branch protection proves that stale approvals are dismissed; this keeps
-a head race from satisfying a merge requirement with an obsolete approval.
+writing. Approval is never offered for a self-authored PR. It proceeds only when
+the command still targets the proposal's exact reviewed head, and the review is
+submitted with that head as its GitHub `commit_id`. Repository rules decide
+whether a later push retains or dismisses the approval; if the head changes
+during the write, Hermes records the approved head and starts a fresh re-review.
 
 If a new commit arrives, every command for the old revision becomes stale. The
 same DM conversation receives a re-review from the exact prior head to the new

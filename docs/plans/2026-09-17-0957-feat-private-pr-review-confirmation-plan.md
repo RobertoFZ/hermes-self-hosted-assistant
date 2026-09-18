@@ -40,6 +40,7 @@ The private confirmation step keeps the automated analysis while reducing the hu
 ### Key Decisions
 
 - **Private confirmation before GitHub writes.** (session-settled: user-directed — chosen over autonomous publication and full manual review: it keeps final judgment human without requiring a full review.) Governs R4-R6.
+- **Repository rules govern approval persistence.** (session-settled: user-directed — chosen over blocking bot approvals unless stale-review dismissal is enabled: the bot should perform the same owner-confirmed approval GitHub permits under the repository's current policy.) Governs R16.
 - **One DM thread per PR.** (session-settled: user-directed — chosen over grouping multiple PRs in one message: each review keeps its own context and actions.) Governs R2-R3.
 - **Bounded private reminders.** (session-settled: user-approved — chosen over indefinite silence or channel escalation: reminders preserve attention without public spam.) Governs R12-R14.
 - **Delta-aware re-review.** (session-settled: user-directed — chosen over presenting an unqualified full summary again: the reviewer needs to see what changed since the prior revision.) Governs R9-R11.
@@ -67,6 +68,7 @@ The private confirmation step keeps the automated analysis while reducing the hu
 - R6. The decision owner can request clarification or evidence, edit or dismiss individual proposed comments, approve the current head when GitHub permits approval, publish the selected comments, or skip the review.
 - R7. Candidate comments must describe an evidence-backed risk to behavior, security, persistent data, migration safety, rollout compatibility, or meaningful regression coverage; mechanical test arrangement, assertion constants, and speculative abstraction preferences are withheld.
 - R8. Immediately before a GitHub write, the review agent verifies the repository, PR number, intended action, and current head; a mismatch rejects the action and starts re-review behavior.
+- R16. An owner-confirmed approval for the active reviewed head is submitted regardless of whether the target branch dismisses stale approvals.
 
 **Re-review behavior**
 
@@ -137,10 +139,12 @@ flowchart TB
 - AE6. **Covers R5-R8.** Given one material candidate comment, when Roberto edits its wording and confirms publication, then only the edited comment is posted to the matching PR and current head.
 - AE7. **Covers R9-R11.** Given a previous finding that was fixed and an unrelated risk introduced later, when re-review runs, then the delta summary marks the old finding addressed and presents the new risk separately.
 - AE8. **Covers R1-R3, R15.** Given one request containing three PRs that finish at different times, when each decision completes, then the original thread retains one verdict message whose three entries are updated without exposing private analysis.
+- AE9. **Covers R8-R11, R16.** Given a non-self-authored PR whose target branch retains stale approvals, when Roberto confirms approval for the active reviewed head, then the bot submits one approval bound to that head; if the head changes during the write, the receipt keeps the approved head and a new proposal is created for the latest head.
 
 ### Success Criteria
 
 - Audited GitHub review actions satisfy the owner-confirmation and head-freshness rules in R5 and R8.
+- Owner-confirmed approvals satisfy R16 without a branch-protection lookup while remaining bound to the reviewed head.
 - Multi-PR requests satisfy the separate-summary and thread isolation rules in R2-R3.
 - Channel behavior satisfies R1 and R15 with one compact verdict per original request and no public analysis, questions, or reminders.
 - Reminder behavior satisfies R12-R14 entirely within the private PR thread and digest.
@@ -154,6 +158,7 @@ flowchart TB
 - The feature does not combine multiple PRs into one summary, one thread, or one publication action.
 - The feature does not post review explanations, reminders, or decision prompts in the revenue-squad channel; R15 is the only allowed verdict message.
 - The feature does not retain mechanical findings as candidate comments; R7 is the publication-quality boundary.
+- The feature does not change repository branch protection or promise that GitHub will invalidate an approval after a later commit.
 
 ### Dependencies
 
@@ -172,6 +177,8 @@ flowchart TB
 - `plugins/slack-pr-review-gate/__init__.py` — current owner-DM access, text acknowledgement, and single-response restriction.
 - `automation/review_automation.py` — current PR-head identity, idempotency, and GitHub reconciliation behavior.
 - `config/crons.json` — existing daily private review digest schedule.
+- [GitHub pull request review API](https://docs.github.com/en/rest/pulls/reviews) — approval reviews accept an explicit `commit_id`.
+- [GitHub protected branch behavior](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches) — repository rules determine whether later pushes dismiss an existing approval.
 - [Seven-day example: reset token lost on locale change](https://github.com/reservamos/reserhub-revenue-web/pull/751#discussion_r3983803495).
 - [Seven-day example: scraper failures reported as successful empty results](https://github.com/reservamos/scrapers-swarm/pull/305#discussion_r4010503854).
 - [Seven-day example: mechanical assertion constant](https://github.com/reservamos/price-engine-python/pull/4131#discussion_r3993113470).
@@ -190,6 +197,7 @@ flowchart TB
 - KTD6. **Detect revision and PR lifecycle drift at existing interaction points.** Repeated intake, every owner-thread interaction, each reminder sweep, and the pre-publication guard check the current head and whether the PR remains open; an externally merged or closed PR becomes terminal, stops reminders, and updates its source verdict. No GitHub webhook or continuous poller is added. Covers R8-R14.
 - KTD7. **Schedule bounded reminders with deterministic working time.** The reminder sweep runs every 15 minutes in `${TZ}`, counts Monday-Friday 09:00-18:00 with no holiday calendar, sends the first reminder after 120 working minutes, sends the second at 09:00 on the next weekday, and then leaves the proposal digest-only. Covers R12-R14.
 - KTD8. **Reconcile external effects before advancing state.** Slack sends attach a stable workflow key as message metadata and recover an ambiguous receipt by searching only the exact conversation or thread for that key; if absence cannot be proved, delivery stays blocked for operator recovery instead of reposting. GitHub action attempts bind the expected commit and replay only unverified items. A concurrent post-check head change is reported privately and triggers re-review rather than being represented as current. Covers R5, R8, and R15.
+- KTD9. **Honor repository approval persistence policy.** Remove the stale-dismissal branch-protection lookup from the approval path while preserving self-review rejection, exact-head validation, `commit_id` binding, receipt reconciliation, and post-write head-drift re-review. (session-settled: user-directed — chosen over retaining the blanket branch-setting block: owner-confirmed bot approvals should follow the repository's existing GitHub policy.) Covers R5-R8 and R16.
 
 ### Assumptions
 
@@ -326,7 +334,7 @@ flowchart LR
 ### Risks and Mitigations
 
 - **Crash between Slack send and receipt persistence:** attach stable workflow metadata where supported and reconcile the known destination; never post a second public verdict as a blind fallback.
-- **Head changes during a GitHub write:** submit approval against the full expected commit, verify repository rules dismiss stale approvals before enabling automated approval, and fail closed unless a raced approval cannot satisfy merge requirements; comments still reconcile against their exact commit before re-review.
+- **Head changes during a GitHub write:** submit approval against the full expected commit, record that head in the receipt, and start re-review when the post-write head differs. When repository rules retain stale approvals, the old approval may remain merge-effective; the bot reports the drift but cannot revoke that repository-level effect.
 - **Partial inline-comment publication:** retain verified publication IDs and retry only missing selected candidates.
 - **Prompt interpretation of approval language:** exact commands are parsed by deterministic automation, and natural-language agent output cannot cross the write boundary.
 - **Reviewer quality remains noisy:** enforce R7 in the reviewer policy and proposal schema, then replay the labeled seven-day corpus before rollout.
@@ -335,7 +343,11 @@ flowchart LR
 
 ## Implementation Units
 
+The workflow described by U1-U2 and U4-U6 is the deployed baseline, not work to rebuild in this change. The active delta is limited to U3's KTD9 approval-path policy, its focused regression tests and documentation, plus U7's commit, merge, and production deployment verification.
+
 ### U1. Add durable workflow state and migrations
+
+- **Status:** Baseline already implemented; preserve unchanged.
 
 - **Goal:** Represent requests, stable PR conversations, immutable proposal revisions, decisions, deliveries, reminders, and verified publications across restarts.
 - **Requirements:** R2-R6, R9-R15; KTD4-KTD5 and KTD8.
@@ -347,6 +359,8 @@ flowchart LR
 
 ### U2. Produce material, executable, read-only proposals
 
+- **Status:** Baseline already implemented; preserve unchanged.
+
 - **Goal:** Make Codex return a no-publish proposal whose findings are useful, stable, and sufficient for delayed execution.
 - **Requirements:** R4, R7, R9-R10; KTD1.
 - **Files:** `automation/review-result.schema.json`, `skills/pr-reviewer/SKILL.md`, `skills/pr-reviewer/references/workflow.md`, `skills/pr-reviewer/references/severity-rubric.md`, `skills/pr-reviewer/scripts/eval.py`, `skills/pr-reviewer/evals/`, `tests/test_pr_reviewer_skill_policy.py`, `tests/test_deployment_tooling_policy.py`.
@@ -356,14 +370,28 @@ flowchart LR
 
 ### U3. Split automation into propose and guarded action paths
 
+- **Status:** Active delta; implement only KTD9 and the directly affected regression coverage and policy text.
+
 - **Goal:** Analyze without GitHub writes and execute only one idempotent, current-head, owner-confirmed action.
-- **Requirements:** R5-R8; KTD1, KTD3, KTD5, and KTD8.
-- **Files:** `automation/review_automation.py`, `skills/codex-pr-review/SKILL.md`, `automation/review-result.schema.json`, `tests/test_review_automation.py`.
-- **Approach:** Replace the publish-first invocation with proposal creation, add commands to load a thread proposal and apply exact edits or decisions, reuse target/head guards from `skills/pr-decision-review/scripts/prepare_review_actions.py`, and retain exact-head GitHub receipt reconciliation.
-- **Test scenarios:** Assert zero GitHub writes during proposal generation; reject wrong-owner, wrong-thread, ambiguous-language, missing-revision, stale-version, and stale-head actions; make repeated `approve P3` or `publish P3 C1 C3` idempotent; make `dismiss P3 C2` idempotent and non-publishing; publish only selected edited candidates; recover after a GitHub write but before local receipt persistence without duplicating it; expose partial success with only missing items retryable; refuse automated approval when stale approvals can satisfy merge rules.
+- **Requirements:** R5-R8 and R16; KTD1, KTD3, KTD5, KTD8, and KTD9.
+- **Files:** `automation/review_automation.py`, `skills/codex-pr-review/SKILL.md`, `automation/review-result.schema.json`, `README.md`, `tests/test_review_automation.py`, `tests/test_deployment_tooling_policy.py`.
+- **Approach:** Keep proposal creation separate from mutation, preserve target and head guards from `skills/pr-decision-review/scripts/prepare_review_actions.py`, remove the branch-setting prerequisite from approval, and retain exact-head GitHub receipt reconciliation.
+- **Test scenarios:**
+  - Assert zero GitHub writes during proposal generation.
+  - Reject wrong-owner, wrong-thread, ambiguous-language, missing-revision, stale-version, stale-head, and self-authored approvals.
+  - Make repeated `approve P3` or `publish P3 C1 C3` idempotent.
+  - Approve the expected commit without reading branch protection when stale approvals are retained.
+  - Make `dismiss P3 C2` idempotent and non-publishing.
+  - Publish only selected edited candidates.
+  - Recover after a GitHub write but before local receipt persistence without duplicating it.
+  - On a retry after the PR head advances, reconcile a marker-bearing approval against the originally reviewed head before rejecting the command as stale, then persist that receipt and re-review the latest head.
+  - Keep the approved-head receipt and start re-review when the head changes during approval.
+  - Expose partial success with only missing items retryable.
 - **Verification:** `python -m unittest tests.test_review_automation -v`.
 
 ### U4. Orchestrate private Slack summaries and the shared verdict
+
+- **Status:** Baseline already implemented; preserve unchanged.
 
 - **Goal:** Turn accepted channel requests into isolated private PR threads and one low-noise editable source verdict.
 - **Requirements:** R1-R6 and R15; KTD2, KTD4-KTD5, and KTD8.
@@ -374,6 +402,8 @@ flowchart LR
 
 ### U5. Add persisted delta-aware re-review
 
+- **Status:** Baseline already implemented; preserve unchanged.
+
 - **Goal:** Re-evaluate new commits against the exact prior proposal and keep the same private conversation.
 - **Requirements:** R8-R11; KTD4 and KTD6.
 - **Files:** `automation/review_automation.py`, `skills/pr-reviewer/SKILL.md`, `skills/pr-reviewer/references/workflow.md`, `skills/codex-pr-review/SKILL.md`, `tests/test_review_automation.py`.
@@ -382,6 +412,8 @@ flowchart LR
 - **Verification:** `python -m unittest tests.test_review_automation tests.test_slack_pr_review_gate -v`.
 
 ### U6. Add bounded private reminders and pending digest data
+
+- **Status:** Baseline already implemented; preserve unchanged.
 
 - **Goal:** Remind Roberto privately without duplicate thread messages or indefinite direct nudges.
 - **Requirements:** R12-R14; KTD5, KTD7, and KTD8.
@@ -392,8 +424,10 @@ flowchart LR
 
 ### U7. Wire deployment policy, documentation, and end-to-end quality gates
 
+- **Status:** Active delta only for directly affected policy tests, README/skill text, commit, PR, merge, and production deployment verification.
+
 - **Goal:** Make the new workflow deployable, observable, and protected against regression to publish-first or noisy review behavior.
-- **Requirements:** R1-R15 and AE1-AE8.
+- **Requirements:** R1-R16 and AE1-AE9.
 - **Files:** `.review.env.example`, `README.md`, `scripts/apply-review-policy.sh`, `scripts/verify.sh`, `config/crons.json`, `skills/review-reminder/SKILL.md`, `tests/test_deployment_tooling_policy.py`, `tests/test_cron_config.py`, `tests/test_pr_reviewer_skill_policy.py`.
 - **Approach:** Validate a single decision owner, apply the updated channel prompt and skill binding, verify the new schema and jobs in-container, document exact commands and recovery states, and commit the labeled seven-day materiality corpus without storing private Slack analysis.
 - **Test scenarios:** Fail closed for missing or ambiguous decision-owner configuration; verify the channel prompt promises no automatic final response; reconcile cron jobs without duplicates; prove the deployed container sees the proposal schema, updated skills, and database; replay false-positive and material-positive audit fixtures with the expected proposal boundary.
@@ -413,22 +447,22 @@ flowchart LR
 | Deployed integration | `make verify` | Hermes, Paseo, GitHub, skills, plugin, workspace, schemas, and managed cron jobs are available in the runtime. |
 | Behavioral corpus | Reviewer eval command documented by `skills/pr-reviewer/scripts/eval.py` | The audited mechanical examples are omitted and material examples remain eligible. |
 
-Manual Slack/GitHub smoke verification is required in an allowlisted test PR: submit two PR URLs, confirm separate DM roots and no public text, ask a read-only question, edit and publish one candidate, push a new commit to the other PR, confirm stale-command rejection and a delta summary, then verify the source request has one edited verdict message and GitHub contains only the explicitly confirmed action.
+The original workflow rollout used an allowlisted Slack/GitHub smoke test covering private routing, publication, stale-command rejection, and delta summaries. This active delta does not issue a live approval during deployment; focused regression tests prove the relaxed approval path, and deployed verification confirms the updated runtime is active.
 
 ---
 
 ## Definition of Done
 
-- U1-U7 are implemented in dependency order and every listed test scenario is covered by automated tests or the named smoke verification.
+- The deployed U1-U2 and U4-U6 baseline remains intact; the KTD9 portion of U3 and the active-delta portion of U7 are implemented and covered by focused automated tests plus the normal local and deployed verification gates.
 - No proposal-generation, reminder, clarification, duplicate-delivery, or timeout path can write to GitHub without an exact current proposal command from the configured owner.
 - Every proposal-changing or terminal command includes the visible active revision token; missing and stale tokens are rejected without mutation or publication.
 - The same repository/PR uses one private Slack conversation across requests and heads, while every source request maintains exactly one public verdict message after its first terminal result.
 - Re-review output names its baseline and latest head and separates addressed, still-open, and new findings, or explicitly reports that a reliable delta was unavailable.
 - The two-reminder schedule survives restarts and overlapping sweeps, then becomes digest-only without posting a new top-level DM.
 - GitHub and Slack external effects are reconciled from receipts, and retries cannot duplicate verified comments, private summary roots, or public verdicts.
-- Automated approval remains disabled for any repository where a raced stale approval can satisfy merge requirements.
+- Automated approval works for an owner-confirmed, non-self-authored current head without requiring stale-review dismissal, and every receipt identifies the exact approved head.
 - The seven-day corpus demonstrates the R7 quality boundary: mechanical findings are absent and material findings remain available for confirmation.
-- `make test` passes; `make verify` passes in the deployed environment; the manual Slack/GitHub smoke flow passes on an allowlisted test PR.
+- `make test` passes and the deployed runtime verification passes after the merged revision is restarted.
 - README and example configuration document exact owner commands, state transitions, reminder timing, failure recovery, and the privacy boundary.
 - Experimental or abandoned implementation paths are removed from the final diff.
 - The work is committed, pushed, opened as a pull request, and CI is green.
