@@ -238,6 +238,55 @@ class SlackReviewPolicyTests(unittest.TestCase):
         self.assertEqual(adapter.sent[0][1].count("acme/api#42"), 1)
         self.assertEqual(adapter.added_reactions[-1][2], "warning")
 
+    def test_self_authored_pr_is_skipped_without_owner_dm(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            adapter = FakeSlackAdapter()
+            request_event = event(
+                "U_REVIEWER",
+                "C_REVIEW",
+                "https://github.com/acme/api/pull/42",
+            )
+            pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/42",
+                repo="acme/api",
+                number=42,
+                title="Owner change",
+                body="",
+                head_sha="a" * 40,
+                base_ref="main",
+                author_login="review-bot",
+            )
+            self.plugin._AUTOMATION = automation
+
+            with patch.dict(
+                os.environ, {"REVIEW_HISTORY_DB": str(database)}, clear=False
+            ), patch.object(
+                automation, "reviewer_login", return_value="review-bot"
+            ), patch.object(
+                automation, "load_pr", return_value=pr
+            ), patch.object(
+                automation,
+                "invoke_codex",
+                side_effect=AssertionError("self-authored PR must not be analyzed"),
+            ) as invoke_codex:
+                asyncio.run(
+                    self.plugin._run_source_request(
+                        adapter,
+                        request_event.source,
+                        request_event,
+                        [pr.url],
+                    )
+                )
+
+        invoke_codex.assert_not_called()
+        self.assertEqual(len(adapter.sent), 1)
+        self.assertEqual(adapter.sent[0][0], "C_REVIEW")
+        self.assertEqual(adapter.sent[0][2], "1")
+        self.assertIn("skipped", adapter.sent[0][1])
+        self.assertNotIn("D_OWNER", [item[0] for item in adapter.sent])
+        self.assertEqual(adapter.added_reactions[-1][2], "white_check_mark")
+
     def test_thread_context_url_is_not_inherited_by_current_message(self):
         result = self.plugin._review_only_policy(
             event(

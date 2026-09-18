@@ -239,6 +239,62 @@ class ReviewAutomationTests(unittest.TestCase):
             self.assertEqual(row["state"], "awaiting_decision")
             self.assertFalse(json.loads(row["structured_result"])["published"])
 
+    def test_propose_skips_pr_authored_by_authenticated_reviewer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/42",
+                repo="acme/api",
+                number=42,
+                title="Owner change",
+                body="",
+                head_sha="a" * 40,
+                base_ref="main",
+                author_login="Review-Bot",
+            )
+            with patch.object(automation, "load_pr", return_value=pr), patch.object(
+                automation, "reviewer_login", return_value="review-bot"
+            ), patch.object(
+                automation,
+                "invoke_codex",
+                side_effect=AssertionError("self-authored PR must not be analyzed"),
+            ) as invoke_codex:
+                proposed = automation.propose_urls(
+                    [pr.url],
+                    db_path=str(database),
+                    workspace_id="T1",
+                    source_channel_id="C1",
+                    source_message_ts="1720000000.000100",
+                    requester_user_id="U_REQUESTER",
+                    owner_user_id="U_OWNER",
+                )
+
+            self.assertEqual(
+                proposed["results"][0]["status"], "skipped_self_authored"
+            )
+            self.assertEqual(proposed["awaiting_decision"], 0)
+            invoke_codex.assert_not_called()
+            with automation.connect_db(database) as db:
+                proposal_count = db.execute(
+                    "SELECT COUNT(*) FROM proposal_revisions"
+                ).fetchone()[0]
+                member = db.execute(
+                    "SELECT state, outcome, reviewed_head FROM workflow_request_members"
+                ).fetchone()
+                request = db.execute(
+                    "SELECT state, reaction_name FROM workflow_source_requests"
+                ).fetchone()
+
+            self.assertEqual(proposal_count, 0)
+            self.assertEqual(
+                (member["state"], member["outcome"], member["reviewed_head"]),
+                ("skipped", "skipped", pr.head_sha),
+            )
+            self.assertEqual(
+                (request["state"], request["reaction_name"]),
+                ("completed", "white_check_mark"),
+            )
+
     def test_analysis_lease_outlives_configured_paseo_timeout(self):
         now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory, patch.dict(
