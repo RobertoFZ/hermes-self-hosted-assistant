@@ -263,7 +263,7 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
             "one compact verdict",
             "two working hours",
             "delta unavailable",
-            "branch protection",
+            "Repository rules decide",
             "operator-blocked",
             "Manual Slack/GitHub smoke test",
             "materiality-corpus.json",

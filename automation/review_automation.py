@@ -11,7 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -4581,19 +4581,6 @@ def action_marker(action_id: str, candidate_id: str | None = None) -> str:
     return f"<!-- hermes-review-action:{action_id}{suffix} -->"
 
 
-def approval_dismisses_stale_reviews(pr: PullRequest) -> bool:
-    """Fail closed unless branch protection invalidates raced stale approvals."""
-    owner, repo = pr.repo.split("/", 1)
-    try:
-        protection = gh_json(
-            ["api", f"repos/{owner}/{repo}/branches/{pr.base_ref}/protection"]
-        )
-    except AutomationError:
-        return False
-    required = protection.get("required_pull_request_reviews") or {}
-    return required.get("dismiss_stale_reviews") is True
-
-
 def _decision_action_row(
     db: sqlite3.Connection, decision_id: str
 ) -> dict[str, Any]:
@@ -4741,6 +4728,54 @@ def _finish_workflow_action(
             reviewed_head=head_sha,
             published_comment_count=comment_count,
         )
+
+
+def _complete_published_action(
+    db: sqlite3.Connection,
+    *,
+    action_row: Mapping[str, Any],
+    decision_id: str,
+    action_id: str,
+    action: str,
+    expected_head: str,
+    comment_count: int,
+    observed_pr: PullRequest,
+    login: str,
+) -> dict[str, Any]:
+    receipt = {
+        "action": action,
+        "head_sha": expected_head,
+        "comment_count": comment_count,
+        "head_changed_after_write": observed_pr.head_sha != expected_head,
+    }
+    _finish_workflow_action(
+        db,
+        decision_id=decision_id,
+        action_id=action_id,
+        action=action,
+        proposal_id=str(action_row["proposal_id"]),
+        conversation_id=str(action_row["conversation_id"]),
+        head_sha=expected_head,
+        comment_count=comment_count,
+        receipt=receipt,
+    )
+    completed = _action_receipt(db, action_id)
+    if receipt["head_changed_after_write"] and observed_pr.state == "OPEN":
+        try:
+            completed["re_review"] = re_review_current_head(
+                db,
+                conversation_id=str(action_row["conversation_id"]),
+                pr=observed_pr,
+                login=login,
+                claimant="post-write-re-review",
+            )
+        except (AutomationError, OSError, subprocess.TimeoutExpired) as exc:
+            completed["re_review"] = {
+                "status": "failed",
+                "head_sha": observed_pr.head_sha,
+                "error": str(exc),
+            }
+    return completed
 
 
 def _block_workflow_action(
@@ -4957,6 +4992,30 @@ def execute_thread_command(
         )
     expected_head = str(action_row["expected_head"])
     if pr.head_sha != expected_head:
+        if command.action == "approve":
+            login = reviewer_login()
+            reviewed_pr = replace(pr, head_sha=expected_head)
+            publications = github_publications(reviewed_pr, login)
+            _record_action_publications(
+                db, action_id=action_id, publications=publications
+            )
+            recovered = db.execute(
+                "SELECT COUNT(*) FROM action_publications WHERE action_id = ? "
+                "AND kind = 'review'",
+                (action_id,),
+            ).fetchone()[0] > 0
+            if recovered:
+                return _complete_published_action(
+                    db,
+                    action_row=action_row,
+                    decision_id=decision_id,
+                    action_id=action_id,
+                    action=command.action,
+                    expected_head=expected_head,
+                    comment_count=0,
+                    observed_pr=pr,
+                    login=login,
+                )
         stale_result = _block_workflow_action(
             db,
             decision_id=decision_id,
@@ -5013,14 +5072,6 @@ def execute_thread_command(
                 action_id=action_id,
                 proposal_id=str(action_row["proposal_id"]),
                 reason="self-authored pull requests cannot be approved",
-            )
-        if not approval_dismisses_stale_reviews(pr):
-            return _block_workflow_action(
-                db,
-                decision_id=decision_id,
-                action_id=action_id,
-                proposal_id=str(action_row["proposal_id"]),
-                reason="branch protection does not prove stale approvals are dismissed",
             )
 
     before = github_publications(pr, login)
@@ -5102,41 +5153,19 @@ def execute_thread_command(
             "action_id": action_id,
         }
 
-    post_write = load_pr(pr.url)
-    receipt = {
-        "action": command.action,
-        "head_sha": expected_head,
-        "comment_count": 0 if command.action == "approve" else len(command.candidate_ids),
-        "head_changed_after_write": post_write.head_sha != expected_head,
-    }
-    _finish_workflow_action(
+    return _complete_published_action(
         db,
+        action_row=action_row,
         decision_id=decision_id,
         action_id=action_id,
         action=command.action,
-        proposal_id=str(action_row["proposal_id"]),
-        conversation_id=str(action_row["conversation_id"]),
-        head_sha=expected_head,
-        comment_count=receipt["comment_count"],
-        receipt=receipt,
+        expected_head=expected_head,
+        comment_count=(
+            0 if command.action == "approve" else len(command.candidate_ids)
+        ),
+        observed_pr=load_pr(pr.url),
+        login=login,
     )
-    completed = _action_receipt(db, action_id)
-    if receipt["head_changed_after_write"] and post_write.state == "OPEN":
-        try:
-            completed["re_review"] = re_review_current_head(
-                db,
-                conversation_id=str(action_row["conversation_id"]),
-                pr=post_write,
-                login=login,
-                claimant="post-write-re-review",
-            )
-        except (AutomationError, OSError, subprocess.TimeoutExpired) as exc:
-            completed["re_review"] = {
-                "status": "failed",
-                "head_sha": post_write.head_sha,
-                "error": str(exc),
-            }
-    return completed
 
 
 def decide_thread_command(

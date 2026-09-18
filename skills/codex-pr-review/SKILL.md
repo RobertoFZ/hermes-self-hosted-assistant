@@ -103,8 +103,10 @@ linked source verdict from the returned projection updates.
 - Never call `gh pr review`, a GitHub write API, Paseo, Codex, or `pr-reviewer`
   directly. The automation owns proposal invocation, freshness checks,
   publication, receipt reconciliation, and idempotency.
-- Never approve a self-authored PR. Never use an approval path unless branch
-  protection proves stale approvals are dismissed.
+- Never approve a self-authored PR. Approve only the active proposal's exact
+  current head and bind the GitHub review to that commit. Repository rules may
+  retain that approval after a later push; if the head changes during the write,
+  preserve the approved-head receipt and start re-review for the latest head.
 - Never publish an unselected, dismissed, stale, or coordinate-incomplete
   candidate.
 - Never move a question, proposal body, evidence, edit, reminder, or operational
