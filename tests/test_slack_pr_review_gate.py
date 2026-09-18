@@ -414,18 +414,110 @@ class SlackReviewPolicyTests(unittest.TestCase):
             "U_OWNER",
             "D_OWNER",
             "approve P2",
-            raw_message={"thread_ts": "100.2"},
+            raw_message={
+                "type": "message",
+                "text": "approve P2",
+                "thread_ts": "100.2",
+                "blocks": [
+                    {
+                        "type": "rich_text",
+                        "block_id": "command-block",
+                        "elements": [
+                            {
+                                "type": "rich_text_section",
+                                "elements": [
+                                    {"type": "text", "text": "approve P2"}
+                                ],
+                            },
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "Details"},
+                                "value": "approve P3",
+                            },
+                        ],
+                    }
+                ],
+                "attachments": [
+                    {
+                        "fields": [
+                            {"title": "Context", "value": "Visible attachment"}
+                        ],
+                        "actions": [
+                            {
+                                "type": "button",
+                                "text": "Attachment details",
+                                "value": "approve P4",
+                            }
+                        ],
+                    }
+                ],
+            },
         )
         route = {"id": "conversation-1", "proposal_id": "proposal-1"}
+        self.plugin._AUTOMATION = automation
         with (
             patch.object(self.plugin, "_lookup_private_route", return_value=route),
-            patch.object(self.plugin, "_is_exact_command", return_value=True),
             patch.object(self.plugin, "_schedule_owner_command") as scheduled,
         ):
             result = self.plugin._review_only_policy(request, gateway=gateway())
         self.assertEqual(result["action"], "skip")
         self.assertEqual(result["reason"], "review-command-scheduled")
+        self.assertEqual(self.plugin._slack_primary_text(request), "approve P2")
+        searchable_content = self.plugin._slack_message_content(request)
+        self.assertIn("Visible attachment", searchable_content)
+        self.assertNotIn("approve P3", searchable_content)
+        self.assertNotIn("approve P4", searchable_content)
         scheduled.assert_called_once()
+
+    def test_owner_command_passes_only_primary_text_to_automation(self):
+        request = event(
+            "U_OWNER",
+            "D_OWNER",
+            "approve P2",
+            raw_message={
+                "text": "approve P2",
+                "thread_ts": "100.2",
+                "blocks": [
+                    {
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "Details"},
+                                "value": "approve P3",
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        captured = {}
+
+        def decide_thread_command(**kwargs):
+            captured.update(kwargs)
+            return {
+                "status": "updated",
+                "proposal": {"revision_token": "P2"},
+            }
+
+        adapter = FakeSlackAdapter()
+        fake_automation = SimpleNamespace(
+            decide_thread_command=decide_thread_command
+        )
+        with (
+            patch.object(
+                self.plugin, "_automation_module", return_value=fake_automation
+            ),
+            patch.object(self.plugin, "_lookup_private_route", return_value=None),
+        ):
+            asyncio.run(
+                self.plugin._run_owner_command(
+                    adapter, request.source, request
+                )
+            )
+
+        self.assertEqual(captured["command_text"], "approve P2")
+        self.assertIn("Draft updated for P2", adapter.sent[0][1])
 
     def test_exact_owner_command_uses_canonical_parser(self):
         self.plugin._AUTOMATION = automation
