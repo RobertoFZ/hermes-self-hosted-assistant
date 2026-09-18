@@ -1532,6 +1532,90 @@ def record_analysis_output(
     db.commit()
 
 
+def record_analysis_failure(
+    db: sqlite3.Connection,
+    *,
+    proposal_id: str,
+    attempt_id: str,
+    error: str,
+    now: datetime | None = None,
+) -> list[str]:
+    """Terminalize a failed analysis and every active source projection."""
+    stamp = iso(now or utc_now())
+    detail = error[:4000]
+    db.rollback()
+    try:
+        _begin_immediate(db)
+        target = db.execute(
+            """
+            SELECT p.conversation_id, p.head_sha
+            FROM proposal_revisions p
+            JOIN analysis_attempts a ON a.proposal_id = p.id
+            WHERE p.id = ? AND a.id = ?
+            """,
+            (proposal_id, attempt_id),
+        ).fetchone()
+        if target is None:
+            raise AutomationError("analysis attempt does not belong to proposal")
+        conversation_id = str(target["conversation_id"])
+        reviewed_head = str(target["head_sha"])
+        attempt_updated = db.execute(
+            """
+            UPDATE analysis_attempts
+            SET state = 'failed', completed_at = ?, lease_expires_at = NULL,
+                error = ?
+            WHERE id = ? AND proposal_id = ?
+              AND state IN ('running', 'output_received', 'ready_to_persist')
+            """,
+            (stamp, detail, attempt_id, proposal_id),
+        ).rowcount
+        if attempt_updated != 1:
+            db.commit()
+            return []
+        proposal_updated = db.execute(
+            """
+            UPDATE proposal_revisions
+            SET state = 'failed', terminal_at = ?
+            WHERE id = ? AND conversation_id = ?
+              AND state IN ('queued', 'analyzing', 'output_pending',
+                            'awaiting_decision', 'publishing')
+            """,
+            (stamp, proposal_id, conversation_id),
+        ).rowcount
+        if proposal_updated != 1:
+            db.commit()
+            return []
+        request_ids = [
+            str(row["request_id"])
+            for row in db.execute(
+                """
+                SELECT request_id FROM workflow_request_members
+                WHERE conversation_id = ? ORDER BY request_id
+                """,
+                (conversation_id,),
+            ).fetchall()
+        ]
+        db.execute(
+            """
+            UPDATE workflow_request_members
+            SET state = 'failed', outcome = 'failed', reviewed_head = ?,
+                published_comment_count = 0, error = ?, updated_at = ?
+            WHERE conversation_id = ?
+              AND state NOT IN ('approved', 'comments_published', 'skipped',
+                                'merged_externally', 'closed_externally',
+                                'operator_blocked')
+            """,
+            (reviewed_head, detail, stamp, conversation_id),
+        )
+        for request_id in request_ids:
+            _refresh_source_request_locked(db, request_id, stamp=stamp)
+        db.commit()
+        return request_ids
+    except Exception:
+        db.rollback()
+        raise
+
+
 def persist_proposal_result(
     db: sqlite3.Connection,
     *,
@@ -3392,6 +3476,30 @@ def validate_proposal_result(result: Mapping[str, Any], pr: PullRequest) -> None
         raise AutomationError("Codex proposal objective is required")
     if not isinstance(result.get("findings"), list):
         raise AutomationError("Codex proposal findings must be a list")
+    for finding in result["findings"]:
+        path = finding.get("path")
+        line = finding.get("line")
+        side = finding.get("side")
+        start_line = finding.get("start_line")
+        start_side = finding.get("start_side")
+        if path is None and any(
+            value is not None for value in (line, side, start_line, start_side)
+        ):
+            raise AutomationError(
+                "Codex proposal finding coordinates require a path"
+            )
+        if path is not None and (line is None or side not in {"LEFT", "RIGHT"}):
+            raise AutomationError(
+                "Codex proposal inline coordinates require a line and side"
+            )
+        if start_line is None and start_side is not None:
+            raise AutomationError(
+                "Codex proposal finding start coordinates are incomplete"
+            )
+        if start_line is not None and start_side not in {"LEFT", "RIGHT"}:
+            raise AutomationError(
+                "Codex proposal finding start coordinates are incomplete"
+            )
     if str(result.get("event")) == "APPROVE":
         blocking = [
             finding
@@ -4269,6 +4377,20 @@ def analyze_proposal_revision(
             "delta_status": str(delta.get("status") or "initial"),
             "delta": dict(delta),
         }
+    except Exception as exc:
+        try:
+            record_analysis_failure(
+                db,
+                proposal_id=str(proposal["id"]),
+                attempt_id=attempt_id,
+                error=str(exc),
+            )
+        except Exception as persistence_error:
+            print(
+                "Unable to persist analysis failure: " + str(persistence_error),
+                file=sys.stderr,
+            )
+        raise
     finally:
         cleanup_warnings.extend(cleanup_paseo_review_agent(str(proposal["id"])))
         if cleanup_warnings:

@@ -66,8 +66,9 @@ def gateway(bot_user_id: str = "U_BOT"):
 
 
 class FakeSlackAdapter:
-    def __init__(self, *, fail_send: bool = False):
+    def __init__(self, *, fail_send: bool = False, fail_reaction: bool = False):
         self.fail_send = fail_send
+        self.fail_reaction = fail_reaction
         self.sent = []
         self.edited = []
         self.added_reactions = []
@@ -97,7 +98,7 @@ class FakeSlackAdapter:
 
     async def _add_reaction(self, channel, timestamp, emoji, team_id=""):
         self.added_reactions.append((channel, timestamp, emoji, team_id))
-        return True
+        return not self.fail_reaction
 
     async def _remove_reaction(self, channel, timestamp, emoji, team_id=""):
         self.removed_reactions.append((channel, timestamp, emoji, team_id))
@@ -139,6 +140,103 @@ class SlackReviewPolicyTests(unittest.TestCase):
             event("U_REVIEWER", "C_REVIEW", "https://github.com/acme/api/pull/42")
         )
         self.assertEqual(result["reason"], "review-decision-owner-not-configured")
+
+    def test_owner_configuration_rejects_a_dm_channel_as_the_owner_identity(self):
+        with patch.dict(
+            os.environ,
+            {
+                **POLICY_ENV,
+                "SLACK_REVIEW_OWNER_USER_IDS": "D_OWNER",
+                "SLACK_REVIEW_DIGEST_USER_ID": "D_OWNER",
+            },
+            clear=False,
+        ):
+            plugin = load_plugin()
+
+        self.assertEqual(plugin.DECISION_OWNER_USER_ID, "")
+
+    def test_failed_reaction_write_is_reported(self):
+        adapter = FakeSlackAdapter(fail_reaction=True)
+
+        with self.assertLogs(self.plugin.logger, level="WARNING") as captured:
+            applied = asyncio.run(
+                self.plugin._set_request_reaction(
+                    adapter, "C_REVIEW", "100.1", "T_TEST", "eyes"
+                )
+            )
+
+        self.assertFalse(applied)
+        self.assertIn("Unable to apply Slack review reaction", captured.output[0])
+
+    def test_analysis_failure_projects_one_failed_verdict_to_source_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            adapter = FakeSlackAdapter()
+            request_event = event(
+                "U_REVIEWER",
+                "C_REVIEW",
+                "https://github.com/acme/api/pull/42",
+            )
+            self.plugin._AUTOMATION = automation
+
+            def fail_analysis(
+                db,
+                _url,
+                _login,
+                *,
+                request_id,
+                workspace_id,
+                owner_user_id,
+                position,
+                claimant,
+            ):
+                conversation_id, _ = automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id=workspace_id,
+                    owner_user_id=owner_user_id,
+                    repo="acme/api",
+                    pr_number=42,
+                    pr_url="https://github.com/acme/api/pull/42",
+                )
+                automation.associate_request_conversation(
+                    db, request_id, conversation_id, position=position
+                )
+                proposal = automation.create_proposal_revision(
+                    db, conversation_id, head_sha="a" * 40
+                )
+                _, attempt_id = automation.claim_analysis_attempt(
+                    db, proposal["id"], claimant=claimant
+                )
+                automation.record_analysis_failure(
+                    db,
+                    proposal_id=proposal["id"],
+                    attempt_id=attempt_id,
+                    error="invalid output schema",
+                )
+                raise automation.AutomationError("invalid output schema")
+
+            with patch.dict(
+                os.environ, {"REVIEW_HISTORY_DB": str(database)}, clear=False
+            ), patch.object(
+                automation, "reviewer_login", return_value="review-bot"
+            ), patch.object(
+                automation, "propose_one", side_effect=fail_analysis
+            ):
+                asyncio.run(
+                    self.plugin._run_source_request(
+                        adapter,
+                        request_event.source,
+                        request_event,
+                        ["https://github.com/acme/api/pull/42"],
+                    )
+                )
+
+        self.assertEqual(len(adapter.sent), 1)
+        self.assertEqual(adapter.sent[0][0], "C_REVIEW")
+        self.assertEqual(adapter.sent[0][2], "1")
+        self.assertIn("failed", adapter.sent[0][1])
+        self.assertEqual(adapter.sent[0][1].count("acme/api#42"), 1)
+        self.assertEqual(adapter.added_reactions[-1][2], "warning")
 
     def test_thread_context_url_is_not_inherited_by_current_message(self):
         result = self.plugin._review_only_policy(

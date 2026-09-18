@@ -270,6 +270,154 @@ class ReviewAutomationTests(unittest.TestCase):
             timedelta(seconds=3720),
         )
 
+    def test_analysis_failure_is_persisted_instead_of_leaving_a_running_lease(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            pr = automation.PullRequest(
+                url="https://github.com/acme/api/pull/42",
+                repo="acme/api",
+                number=42,
+                title="API",
+                body="",
+                head_sha="a" * 40,
+                base_ref="main",
+                author_login="developer",
+            )
+            with automation.connect_db(database) as db:
+                request_id, _ = automation.get_or_create_source_request(
+                    db,
+                    workspace_id="T1",
+                    channel_id="C_REVIEW",
+                    message_ts="100.1",
+                    requester_user_id="U_REVIEWER",
+                )
+                conversation_id, _ = automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T1",
+                    owner_user_id="U_OWNER",
+                    repo=pr.repo,
+                    pr_number=pr.number,
+                    pr_url=pr.url,
+                )
+                automation.associate_request_conversation(
+                    db, request_id, conversation_id, position=0
+                )
+                proposal = automation.create_proposal_revision(
+                    db, conversation_id, head_sha=pr.head_sha
+                )
+
+                with patch.object(
+                    automation,
+                    "invoke_codex",
+                    side_effect=automation.AutomationError("invalid output schema"),
+                ), patch.object(
+                    automation, "cleanup_paseo_review_agent", return_value=[]
+                ):
+                    with self.assertRaisesRegex(
+                        automation.AutomationError, "invalid output schema"
+                    ):
+                        automation.analyze_proposal_revision(
+                            db,
+                            pr=pr,
+                            login="review-bot",
+                            proposal=proposal,
+                            claimant="worker",
+                        )
+
+                attempt = db.execute(
+                    "SELECT state, lease_expires_at, error FROM analysis_attempts"
+                ).fetchone()
+                persisted_proposal = db.execute(
+                    "SELECT state FROM proposal_revisions WHERE id = ?",
+                    (proposal["id"],),
+                ).fetchone()
+                member = db.execute(
+                    "SELECT state, outcome, error FROM workflow_request_members"
+                ).fetchone()
+                request = db.execute(
+                    "SELECT state, reaction_name FROM workflow_source_requests"
+                ).fetchone()
+
+        self.assertEqual(attempt["state"], "failed")
+        self.assertIsNone(attempt["lease_expires_at"])
+        self.assertIn("invalid output schema", attempt["error"])
+        self.assertEqual(persisted_proposal["state"], "failed")
+        self.assertEqual((member["state"], member["outcome"]), ("failed", "failed"))
+        self.assertIn("invalid output schema", member["error"])
+        self.assertEqual((request["state"], request["reaction_name"]), ("failed", "warning"))
+
+    def test_expired_worker_cannot_fail_a_replacement_analysis_attempt(self):
+        now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                request_id, _ = automation.get_or_create_source_request(
+                    db,
+                    workspace_id="T1",
+                    channel_id="C_REVIEW",
+                    message_ts="100.1",
+                    requester_user_id="U_REVIEWER",
+                )
+                conversation_id, _ = automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T1",
+                    owner_user_id="U_OWNER",
+                    repo="acme/api",
+                    pr_number=42,
+                    pr_url="https://github.com/acme/api/pull/42",
+                )
+                automation.associate_request_conversation(
+                    db, request_id, conversation_id, position=0
+                )
+                proposal = automation.create_proposal_revision(
+                    db, conversation_id, head_sha="a" * 40
+                )
+                _, expired_attempt_id = automation.claim_analysis_attempt(
+                    db,
+                    proposal["id"],
+                    claimant="expired-worker",
+                    now=now,
+                    lease_seconds=1,
+                )
+                _, replacement_attempt_id = automation.claim_analysis_attempt(
+                    db,
+                    proposal["id"],
+                    claimant="replacement-worker",
+                    now=now + timedelta(seconds=2),
+                    lease_seconds=60,
+                )
+
+                updated_requests = automation.record_analysis_failure(
+                    db,
+                    proposal_id=proposal["id"],
+                    attempt_id=expired_attempt_id,
+                    error="late worker failure",
+                    now=now + timedelta(seconds=3),
+                )
+                attempts = {
+                    row["id"]: row["state"]
+                    for row in db.execute(
+                        "SELECT id, state FROM analysis_attempts"
+                    ).fetchall()
+                }
+                proposal_state = db.execute(
+                    "SELECT state FROM proposal_revisions WHERE id = ?",
+                    (proposal["id"],),
+                ).fetchone()[0]
+                member_state = db.execute(
+                    "SELECT state FROM workflow_request_members"
+                ).fetchone()[0]
+                request_state = db.execute(
+                    "SELECT state FROM workflow_source_requests"
+                ).fetchone()[0]
+
+        self.assertEqual(updated_requests, [])
+        self.assertEqual(attempts[expired_attempt_id], "expired")
+        self.assertEqual(attempts[replacement_attempt_id], "running")
+        self.assertEqual(proposal_state, "analyzing")
+        self.assertEqual(member_state, "analyzing")
+        self.assertEqual(request_state, "pending")
+
     def test_proposal_validation_rejects_approval_with_blocking_findings(self):
         pr = automation.PullRequest(
             url="https://github.com/acme/api/pull/42",
@@ -298,6 +446,77 @@ class ReviewAutomationTests(unittest.TestCase):
                 )
                 result["event"] = "APPROVE"
                 with self.assertRaisesRegex(automation.AutomationError, "gate-blocking"):
+                    automation.validate_delta_result(
+                        result,
+                        pr,
+                        baseline_head_sha=None,
+                        prior_findings=(),
+                        compare_context=None,
+                    )
+
+    def test_proposal_validation_rejects_inconsistent_finding_coordinates(self):
+        pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/42",
+            repo="acme/api",
+            number=42,
+            title="API",
+            body="",
+            head_sha="a" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        invalid_locations = (
+            {
+                "path": None,
+                "line": 42,
+                "side": "RIGHT",
+                "start_line": None,
+                "start_side": None,
+            },
+            {
+                "path": "price.py",
+                "line": 42,
+                "side": "RIGHT",
+                "start_line": 40,
+                "start_side": None,
+            },
+            {
+                "path": "price.py",
+                "line": None,
+                "side": "RIGHT",
+                "start_line": None,
+                "start_side": None,
+            },
+            {
+                "path": "price.py",
+                "line": 42,
+                "side": None,
+                "start_line": None,
+                "start_side": None,
+            },
+        )
+        for location in invalid_locations:
+            with self.subTest(location=location):
+                finding = {
+                    "candidate_id": "C1",
+                    "category": "correctness",
+                    "severity": "major",
+                    "body": "The persisted price is overwritten.",
+                    "evidence": "The write discards the previous value.",
+                    "blocking": True,
+                    **location,
+                }
+                result = self._delta_result(
+                    head_sha=pr.head_sha,
+                    baseline_head_sha=None,
+                    status="initial",
+                    findings=(finding,),
+                    new=("C1",),
+                )
+
+                with self.assertRaisesRegex(
+                    automation.AutomationError, "coordinates"
+                ):
                     automation.validate_delta_result(
                         result,
                         pr,
