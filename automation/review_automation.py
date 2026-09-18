@@ -4489,6 +4489,19 @@ def propose_one(
         pr_url=pr.url,
     )
     associate_request_conversation(db, request_id, conversation_id, position=position)
+    if pr.author_login.lower() == login.lower():
+        update_request_member_outcome(
+            db,
+            conversation_id=conversation_id,
+            outcome="skipped",
+            reviewed_head=pr.head_sha,
+        )
+        return {
+            "url": pr.url,
+            "status": "skipped_self_authored",
+            "conversation_id": conversation_id,
+            "head_sha": pr.head_sha,
+        }
     if pr.state in {"MERGED", "CLOSED"}:
         return finalize_external_pr(db, conversation_id=conversation_id, pr=pr)
     if pr.state != "OPEN":

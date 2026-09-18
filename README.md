@@ -268,10 +268,10 @@ The Slack policy behaves as follows:
 - A message explicitly addressed to a configured competing bot is ignored
   unless it also mentions Hermes. Messages with no bot mention keep the natural
   URL-only trigger.
-- Allowed PR URLs trigger reviews regardless of surrounding wording. A PR
-  authored by the authenticated GitHub reviewer is the exception: it is
-  reviewed only when a configured Slack owner mentions the Hermes bot in the
-  same message. Other PRs in a mixed message continue normally.
+- Allowed PR URLs trigger reviews regardless of surrounding wording. PRs
+  authored by the authenticated GitHub reviewer are recorded as skipped without
+  running Codex or sending an owner DM. Other PRs in a mixed message continue
+  normally.
 - Unsupported URLs or unrelated instructions are discarded before inference.
 - An accepted request has a reaction-only pending state. Hermes sends no
   automatic public acknowledgement or final response.
@@ -292,6 +292,7 @@ head-bound proposal. The path for a Slack request is:
 Slack request
   -> reaction-only pending state
   -> SQLite request and PR conversation
+  -> self-authored PRs stop as skipped
   -> Paseo / Codex $pr-reviewer read-only proposal
   -> one top-level DM per PR
   -> exact owner command in that DM thread

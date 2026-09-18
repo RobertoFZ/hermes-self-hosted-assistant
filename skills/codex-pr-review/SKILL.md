@@ -40,8 +40,10 @@ python3 /opt/review-automation/review_automation.py propose \
 ```
 
 The JSON is authoritative. `awaiting_decision` means a read-only proposal was
-persisted; it does not mean anything was published. The Slack gate owns DM
-delivery, thread binding, reactions, and the shared public verdict.
+persisted; it does not mean anything was published. `skipped_self_authored`
+means the authenticated GitHub reviewer authored the PR: stop before analysis
+and owner-DM delivery, while the Slack gate records the compact shared verdict.
+The Slack gate owns DM delivery, thread binding, reactions, and that verdict.
 
 Return exactly `NO_REPLY` for the initial source request. Do not send progress,
 analysis, questions, errors, or completion text into the source channel.
@@ -103,6 +105,8 @@ linked source verdict from the returned projection updates.
 - Never call `gh pr review`, a GitHub write API, Paseo, Codex, or `pr-reviewer`
   directly. The automation owns proposal invocation, freshness checks,
   publication, receipt reconciliation, and idempotency.
+- Treat `skipped_self_authored` as terminal. The source verdict is the only
+  delivery for that PR.
 - Never approve a self-authored PR. Approve only the active proposal's exact
   current head and bind the GitHub review to that commit. Repository rules may
   retain that approval after a later push; if the head changes during the write,
