@@ -209,6 +209,8 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn("target: /opt/global-skills/review-digest", COMPOSE)
         self.assertIn("target: /opt/global-skills/review-reminder", COMPOSE)
         self.assertIn("/opt/data/skills/custom/pr-reviewer", SYNC_SKILLS)
+        self.assertIn("/opt/data/skills/custom/review-reminder", SYNC_SKILLS)
+        self.assertIn("/opt/global-skills/review-reminder/.", SYNC_SKILLS)
         self.assertIn('\\"skill\\": \\"codex-pr-review\\"', APPLY_REVIEW_POLICY)
 
     def test_private_confirmation_policy_fails_closed_and_stays_quiet(self):

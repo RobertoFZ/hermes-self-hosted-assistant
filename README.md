@@ -416,8 +416,9 @@ Manual Slack/GitHub smoke test on allowlisted test PRs:
 All schedules live in the single committed file
 [`config/crons.json`](config/crons.json). It stores the cron expression together
 with the Hermes skill, prompt, delivery target, and working directory. The
-private reminder sweep runs every 15 minutes and returns `NO_REPLY` so the cron
-delivery target never receives a fallback message. The daily digest is
+private reminder sweep runs every 15 minutes. Its generic cron output stays
+local, while the reminder skill sends only due items to their persisted private
+Slack threads and returns `NO_REPLY`. The daily digest is
 `0 17 * * *`; with `TZ=America/Mexico_City`, it runs at 17:00 Mexico City local
 time throughout the year and includes proposals that exhausted both reminders.
 

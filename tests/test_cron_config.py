@@ -32,8 +32,38 @@ class CronConfigTests(unittest.TestCase):
         reminder = next(job for job in config["jobs"] if job["key"] == "pr-review-reminders")
         self.assertEqual(reminder["schedule"], "*/15 * * * *")
         self.assertEqual(reminder["skills"], ["review-reminder"])
+        self.assertEqual(reminder["deliver"], "local")
         self.assertIn("NO_REPLY", reminder["prompt"])
         self.assertEqual(len(config["jobs"]), 2)
+
+    def test_only_reminder_jobs_may_suppress_generic_delivery(self):
+        config = {
+            "version": 1,
+            "timezone": "America/Mexico_City",
+            "jobs": [
+                {
+                    "key": "daily-review-digest",
+                    "name": "Daily PR review digest",
+                    "schedule": "0 17 * * *",
+                    "prompt": "digest",
+                    "skills": ["review-digest"],
+                    "deliver": "local",
+                    "workdir": "/workspace",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "crons.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            with self.assertRaises(sync_crons.CronConfigError):
+                sync_crons.load_config(
+                    path,
+                    {
+                        "TZ": "America/Mexico_City",
+                        "SLACK_REVIEW_OWNER_USER_IDS": "U_OWNER",
+                        "REVIEW_MONOREPO_ROOT": "/workspace",
+                    },
+                )
 
     def test_explicit_decision_owner_must_belong_to_owner_set(self):
         with self.assertRaises(sync_crons.CronConfigError):
