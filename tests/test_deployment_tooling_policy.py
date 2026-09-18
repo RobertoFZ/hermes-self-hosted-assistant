@@ -219,6 +219,11 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn("decision owner must be present", APPLY_REVIEW_POLICY.lower())
         self.assertIn("Slack user ID", APPLY_REVIEW_POLICY)
         self.assertIn(r"[UW][A-Z0-9_]+", APPLY_REVIEW_POLICY)
+        self.assertIn("reconcile-owner", APPLY_REVIEW_POLICY)
+        self.assertLess(
+            APPLY_REVIEW_POLICY.index("reconcile-owner"),
+            APPLY_REVIEW_POLICY.index("hermes config set"),
+        )
         self.assertIn("reaction-only", APPLY_REVIEW_POLICY)
         self.assertIn("no automatic final response", APPLY_REVIEW_POLICY)
         self.assertNotIn("send exactly one final response", APPLY_REVIEW_POLICY)
