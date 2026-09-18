@@ -94,7 +94,13 @@ def load_config(path: str | Path, env: Mapping[str, str] | None = None) -> dict[
             raise CronConfigError(f"cron schedule must have five fields: {key}")
         if not isinstance(job["skills"], list) or not job["skills"]:
             raise CronConfigError(f"cron job must declare at least one skill: {key}")
-        if not str(job["deliver"]).startswith("slack:"):
+        delivery = str(job["deliver"])
+        if key == "pr-review-reminders":
+            if delivery != "local":
+                raise CronConfigError(
+                    "the reminder cron must keep generic output local"
+                )
+        elif not delivery.startswith("slack:"):
             raise CronConfigError(f"cron delivery must be a Slack target: {key}")
     return config
 

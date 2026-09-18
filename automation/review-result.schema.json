@@ -23,7 +23,7 @@
     "head_sha": {"type": "string", "minLength": 7},
     "baseline_head_sha": {"type": ["string", "null"], "minLength": 7},
     "event": {"type": "string", "enum": ["APPROVE", "COMMENT"]},
-    "published": {"const": false},
+    "published": {"type": "boolean", "const": false},
     "objective": {"type": "string", "minLength": 1},
     "summary": {"type": "string", "minLength": 1},
     "findings": {
@@ -71,36 +71,7 @@
           "body": {"type": "string", "minLength": 1},
           "evidence": {"type": "string", "minLength": 1},
           "blocking": {"type": "boolean"}
-        },
-        "allOf": [
-          {
-            "if": {"properties": {"path": {"type": "string"}}},
-            "then": {
-              "properties": {
-                "line": {"type": "integer", "minimum": 1},
-                "side": {"enum": ["LEFT", "RIGHT"]}
-              }
-            },
-            "else": {
-              "properties": {
-                "line": {"const": null},
-                "side": {"const": null},
-                "start_line": {"const": null},
-                "start_side": {"const": null}
-              }
-            }
-          },
-          {
-            "if": {"properties": {"start_line": {"type": "integer"}}},
-            "then": {
-              "properties": {
-                "path": {"type": "string", "minLength": 1},
-                "start_side": {"enum": ["LEFT", "RIGHT"]}
-              }
-            },
-            "else": {"properties": {"start_side": {"const": null}}}
-          }
-        ]
+        }
       }
     },
     "delta": {
@@ -118,18 +89,15 @@
         "summary": {"type": ["string", "null"]},
         "addressed_candidate_ids": {
           "type": "array",
-          "items": {"type": "string", "pattern": "^C[1-9][0-9]*$"},
-          "uniqueItems": true
+          "items": {"type": "string", "pattern": "^C[1-9][0-9]*$"}
         },
         "still_open_candidate_ids": {
           "type": "array",
-          "items": {"type": "string", "pattern": "^C[1-9][0-9]*$"},
-          "uniqueItems": true
+          "items": {"type": "string", "pattern": "^C[1-9][0-9]*$"}
         },
         "new_candidate_ids": {
           "type": "array",
-          "items": {"type": "string", "pattern": "^C[1-9][0-9]*$"},
-          "uniqueItems": true
+          "items": {"type": "string", "pattern": "^C[1-9][0-9]*$"}
         }
       }
     },

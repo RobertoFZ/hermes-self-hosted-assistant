@@ -39,12 +39,30 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
     def test_review_result_schema_is_a_read_only_material_proposal(self):
         schema = REVIEW_RESULT_SCHEMA_JSON
         self.assertIn("published", schema["required"])
-        self.assertEqual(schema["properties"]["published"], {"const": False})
+        self.assertEqual(
+            schema["properties"]["published"],
+            {"type": "boolean", "const": False},
+        )
         self.assertIn("objective", schema["required"])
         self.assertIn("baseline_head_sha", schema["required"])
         self.assertIn("delta", schema["required"])
 
+        def nodes(value):
+            if isinstance(value, dict):
+                yield value
+                for nested in value.values():
+                    yield from nodes(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    yield from nodes(nested)
+
+        for node in nodes(schema):
+            self.assertTrue({"allOf", "uniqueItems"}.isdisjoint(node), node)
+            if "const" in node:
+                self.assertIn("type", node, node)
+
         finding = schema["properties"]["findings"]["items"]
+        self.assertNotIn("allOf", finding)
         self.assertEqual(
             set(finding["properties"]["category"]["enum"]),
             {
@@ -191,12 +209,16 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn("target: /opt/global-skills/review-digest", COMPOSE)
         self.assertIn("target: /opt/global-skills/review-reminder", COMPOSE)
         self.assertIn("/opt/data/skills/custom/pr-reviewer", SYNC_SKILLS)
+        self.assertIn("/opt/data/skills/custom/review-reminder", SYNC_SKILLS)
+        self.assertIn("/opt/global-skills/review-reminder/.", SYNC_SKILLS)
         self.assertIn('\\"skill\\": \\"codex-pr-review\\"', APPLY_REVIEW_POLICY)
 
     def test_private_confirmation_policy_fails_closed_and_stays_quiet(self):
         self.assertIn("SLACK_REVIEW_DIGEST_USER_ID", APPLY_REVIEW_POLICY)
         self.assertIn("exactly one decision owner", APPLY_REVIEW_POLICY.lower())
         self.assertIn("decision owner must be present", APPLY_REVIEW_POLICY.lower())
+        self.assertIn("Slack user ID", APPLY_REVIEW_POLICY)
+        self.assertIn(r"[UW][A-Z0-9_]+", APPLY_REVIEW_POLICY)
         self.assertIn("reaction-only", APPLY_REVIEW_POLICY)
         self.assertIn("no automatic final response", APPLY_REVIEW_POLICY)
         self.assertNotIn("send exactly one final response", APPLY_REVIEW_POLICY)

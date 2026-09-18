@@ -42,6 +42,10 @@ def _repository_values(name: str) -> frozenset[tuple[str, str]]:
     return frozenset(repositories)
 
 
+def _is_slack_user_id(value: str) -> bool:
+    return re.fullmatch(r"[UW][A-Z0-9_]+", value) is not None
+
+
 REVIEW_CHANNEL_ID = os.environ.get("SLACK_REVIEW_CHANNEL_ID", "").strip()
 OWNER_USER_IDS = _csv_values("SLACK_REVIEW_OWNER_USER_IDS")
 REVIEWER_USER_IDS = _csv_values("SLACK_REVIEWER_USER_IDS")
@@ -52,7 +56,9 @@ _configured_owner = os.environ.get("SLACK_REVIEW_DIGEST_USER_ID", "").strip()
 if not _configured_owner and len(OWNER_USER_IDS) == 1:
     _configured_owner = next(iter(OWNER_USER_IDS))
 DECISION_OWNER_USER_ID = (
-    _configured_owner if _configured_owner in OWNER_USER_IDS else ""
+    _configured_owner
+    if _configured_owner in OWNER_USER_IDS and _is_slack_user_id(_configured_owner)
+    else ""
 )
 
 MAX_URLS_PER_MESSAGE = _positive_int("SLACK_REVIEW_MAX_URLS_PER_MESSAGE", 5)
@@ -298,12 +304,53 @@ def _track_task(coro: Awaitable[Any]) -> None:
 
 async def _set_request_reaction(
     adapter: Any, channel_id: str, message_ts: str, team_id: str, reaction: str
-) -> None:
+) -> bool:
     for current in ("warning", "eyes", "white_check_mark"):
         if current != reaction and hasattr(adapter, "_remove_reaction"):
-            await adapter._remove_reaction(channel_id, message_ts, current, team_id)
-    if hasattr(adapter, "_add_reaction"):
-        await adapter._add_reaction(channel_id, message_ts, reaction, team_id)
+            try:
+                await adapter._remove_reaction(
+                    channel_id, message_ts, current, team_id
+                )
+            except Exception:
+                logger.debug(
+                    "Unable to remove stale Slack review reaction %s from %s/%s",
+                    current,
+                    channel_id,
+                    message_ts,
+                    exc_info=True,
+                )
+    if not hasattr(adapter, "_add_reaction"):
+        logger.warning(
+            "Unable to apply Slack review reaction %s to %s/%s: adapter has no "
+            "reaction writer",
+            reaction,
+            channel_id,
+            message_ts,
+        )
+        return False
+    try:
+        applied = await adapter._add_reaction(
+            channel_id, message_ts, reaction, team_id
+        )
+    except Exception:
+        logger.warning(
+            "Unable to apply Slack review reaction %s to %s/%s",
+            reaction,
+            channel_id,
+            message_ts,
+            exc_info=True,
+        )
+        return False
+    if applied is not True:
+        logger.warning(
+            "Unable to apply Slack review reaction %s to %s/%s; verify the "
+            "Slack app has reactions:write",
+            reaction,
+            channel_id,
+            message_ts,
+        )
+        return False
+    return True
 
 
 def _format_proposal(context: dict[str, Any]) -> str:
@@ -627,10 +674,11 @@ async def _run_source_request(
             ready = _ready_proposal_result(result)
             if ready is not None:
                 await _deliver_proposal(adapter, workspace_id, ready)
+        await _project_request(adapter, request_id)
         if failed:
-            await _set_request_reaction(adapter, channel_id, message_ts, workspace_id, "warning")
-        else:
-            await _project_request(adapter, request_id)
+            await _set_request_reaction(
+                adapter, channel_id, message_ts, workspace_id, "warning"
+            )
     finally:
         remaining = _REQUESTER_ACTIVE.get(user_id, 1) - 1
         if remaining > 0:

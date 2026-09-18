@@ -34,16 +34,20 @@ docker compose exec -T hermes /bin/sh -eu -c '
   install -d -o "$HERMES_UID" -g "$HERMES_GID" \
     /opt/data/skills/custom/codex-pr-review \
     /opt/data/skills/custom/review-digest \
+    /opt/data/skills/custom/review-reminder \
     /opt/data/review-history
   cp -a /opt/global-skills/codex-pr-review/. \
     /opt/data/skills/custom/codex-pr-review/
   cp -a /opt/global-skills/review-digest/. \
     /opt/data/skills/custom/review-digest/
+  cp -a /opt/global-skills/review-reminder/. \
+    /opt/data/skills/custom/review-reminder/
 
   python3 /opt/review-automation/review_automation.py init >/dev/null
   chown -R "$HERMES_UID:$HERMES_GID" \
     /opt/data/skills/custom/codex-pr-review \
     /opt/data/skills/custom/review-digest \
+    /opt/data/skills/custom/review-reminder \
     /opt/data/review-history
 '
 
