@@ -129,26 +129,77 @@ def _extract_allowed_pr_urls(text: str) -> tuple[list[str], bool]:
     return urls, unsupported
 
 
-def _iter_slack_strings(value: Any):
+_SLACK_CONTENT_KEYS = frozenset(
+    {
+        "alt_text",
+        "author_name",
+        "fallback",
+        "footer",
+        "pretext",
+        "text",
+        "title",
+        "url",
+    }
+)
+
+
+def _iter_slack_strings(
+    value: Any,
+    *,
+    content_keys: frozenset[str] = _SLACK_CONTENT_KEYS,
+):
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
-        for nested in value.values():
-            yield from _iter_slack_strings(nested)
+        for key, nested in value.items():
+            if key in content_keys or isinstance(
+                nested, (dict, list, tuple)
+            ):
+                yield from _iter_slack_strings(nested, content_keys=content_keys)
     elif isinstance(value, (list, tuple)):
         for nested in value:
-            yield from _iter_slack_strings(nested)
+            yield from _iter_slack_strings(nested, content_keys=content_keys)
+
+
+def _iter_slack_attachment_strings(value: Any):
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key in _SLACK_CONTENT_KEYS:
+                yield from _iter_slack_strings(nested)
+            elif key == "fields" and isinstance(nested, (list, tuple)):
+                for field in nested:
+                    if not isinstance(field, dict):
+                        continue
+                    for field_key in ("title", "value"):
+                        yield from _iter_slack_strings(field.get(field_key))
+            elif isinstance(nested, (dict, list, tuple)):
+                yield from _iter_slack_attachment_strings(nested)
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            yield from _iter_slack_attachment_strings(nested)
 
 
 def _slack_message_content(event: Any) -> str:
     raw_message = getattr(event, "raw_message", None)
     if isinstance(raw_message, dict):
         parts: list[str] = []
-        for key in ("text", "blocks", "attachments"):
-            parts.extend(_iter_slack_strings(raw_message.get(key)))
+        parts.extend(_iter_slack_strings(raw_message.get("text")))
+        parts.extend(_iter_slack_strings(raw_message.get("blocks")))
+        parts.extend(
+            _iter_slack_attachment_strings(raw_message.get("attachments"))
+        )
         current = "\n".join(dict.fromkeys(part for part in parts if part))
         if current:
             return current
+    return str(getattr(event, "text", "") or "")
+
+
+def _slack_primary_text(event: Any) -> str:
+    raw_message = getattr(event, "raw_message", None)
+    if isinstance(raw_message, dict):
+        text = raw_message.get("text")
+        if isinstance(text, str) and text.strip():
+            return text
     return str(getattr(event, "text", "") or "")
 
 
@@ -693,7 +744,7 @@ async def _run_owner_command(adapter: Any, source: Any, event: Any) -> None:
     channel_id = str(getattr(source, "chat_id", "") or "")
     thread_ts = str(getattr(source, "thread_id", "") or "")
     message_ts = str(getattr(event, "message_id", "") or "")
-    command_text = _slack_message_content(event).strip()
+    command_text = _slack_primary_text(event).strip()
     try:
         result = await asyncio.to_thread(
             automation.decide_thread_command,
@@ -772,7 +823,7 @@ def _schedule_owner_command(gateway: Any, source: Any, event: Any) -> None:
 
 
 def _private_question_rewrite(source: Any, event: Any, route: dict[str, Any]) -> dict[str, str]:
-    text = _slack_message_content(event)
+    text = _slack_primary_text(event)
     return {
         "action": "rewrite",
         "text": (
@@ -804,7 +855,7 @@ def _review_only_policy(event: Any, gateway: Any = None, **_kwargs: Any):
     if user_id == DECISION_OWNER_USER_ID and is_direct_message:
         route = _lookup_private_route(source)
         if route is not None:
-            if _is_exact_command(_slack_message_content(event)):
+            if _is_exact_command(_slack_primary_text(event)):
                 _schedule_owner_command(gateway, source, event)
                 return {"action": "skip", "reason": "review-command-scheduled"}
             return _private_question_rewrite(source, event, route)
