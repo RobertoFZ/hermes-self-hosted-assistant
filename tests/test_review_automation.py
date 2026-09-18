@@ -605,6 +605,95 @@ class ReviewAutomationTests(unittest.TestCase):
             self.assertEqual(read_only["status"], "read_only")
             self.assertEqual(after_count, row_count)
 
+    def test_reconcile_decision_owner_repairs_legacy_dm_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                self._ready_proposal(db, owner_user_id="D1")
+                conversation_id = db.execute(
+                    "SELECT id FROM workflow_pr_conversations"
+                ).fetchone()[0]
+                automation.record_proposal_decision(
+                    db,
+                    conversation_id=conversation_id,
+                    revision_token="P1",
+                    owner_user_id="D1",
+                    action="skip",
+                    idempotency_key="legacy-decision",
+                )
+
+                with self.assertRaisesRegex(automation.AutomationError, "owner"):
+                    automation.thread_context(
+                        db,
+                        workspace_id="T1",
+                        dm_channel_id="D1",
+                        thread_ts="1720000000.000100",
+                        owner_user_id="U_OWNER",
+                    )
+
+                result = automation.reconcile_decision_owner(
+                    db, owner_user_id="U_OWNER"
+                )
+                context = automation.thread_context(
+                    db,
+                    workspace_id="T1",
+                    dm_channel_id="D1",
+                    thread_ts="1720000000.000100",
+                    owner_user_id="U_OWNER",
+                )
+                persisted_owner = db.execute(
+                    "SELECT owner_user_id FROM workflow_pr_conversations"
+                ).fetchone()[0]
+                persisted_decision_owner = db.execute(
+                    "SELECT owner_user_id FROM proposal_decisions"
+                ).fetchone()[0]
+                repeated = automation.reconcile_decision_owner(
+                    db, owner_user_id="U_OWNER"
+                )
+
+        self.assertEqual(result["migrated_conversations"], 1)
+        self.assertEqual(result["migrated_decisions"], 1)
+        self.assertEqual(context["revision_token"], "P1")
+        self.assertEqual(persisted_owner, "U_OWNER")
+        self.assertEqual(persisted_decision_owner, "U_OWNER")
+        self.assertEqual(repeated["migrated_conversations"], 0)
+        self.assertEqual(repeated["migrated_decisions"], 0)
+
+    def test_reconcile_decision_owner_rejects_identity_collisions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T1",
+                    owner_user_id="D1",
+                    repo="acme/api",
+                    pr_number=42,
+                    pr_url="https://github.com/acme/api/pull/42",
+                )
+                automation.get_or_create_pr_conversation(
+                    db,
+                    workspace_id="T1",
+                    owner_user_id="U_OWNER",
+                    repo="acme/api",
+                    pr_number=42,
+                    pr_url="https://github.com/acme/api/pull/42",
+                )
+
+                with self.assertRaisesRegex(
+                    automation.AutomationError, "already has a conversation"
+                ):
+                    automation.reconcile_decision_owner(
+                        db, owner_user_id="U_OWNER"
+                    )
+
+                legacy_count = db.execute(
+                    "SELECT COUNT(*) FROM workflow_pr_conversations "
+                    "WHERE owner_user_id = 'D1'"
+                ).fetchone()[0]
+
+        self.assertEqual(legacy_count, 1)
+
     def test_publish_uses_only_selected_edited_active_candidate_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "reviews.sqlite3"

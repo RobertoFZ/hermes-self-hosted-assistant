@@ -23,6 +23,7 @@ PR_URL_RE = re.compile(
     r"(?P<repo>[A-Za-z0-9_.-]+)/pull/(?P<number>[1-9][0-9]*)/?$",
     re.IGNORECASE,
 )
+SLACK_USER_ID_RE = re.compile(r"^[UW][A-Z0-9_]+$")
 DEFAULT_DB = "/opt/data/review-history/reviews.sqlite3"
 DEFAULT_SCHEMA = "/opt/review-automation/review-result.schema.json"
 PASEO_REVIEW_LABEL = "hermes-review-run"
@@ -788,6 +789,75 @@ def get_or_create_pr_conversation(
             )
         db.commit()
         return str(row["id"]), created
+    except Exception:
+        db.rollback()
+        raise
+
+
+def reconcile_decision_owner(
+    db: sqlite3.Connection,
+    *,
+    owner_user_id: str,
+) -> dict[str, Any]:
+    """Replace invalid persisted owner identities without merging conversations."""
+    if not SLACK_USER_ID_RE.fullmatch(owner_user_id):
+        raise AutomationError("decision owner must be a Slack user ID")
+    db.create_function(
+        "is_slack_user_id",
+        1,
+        lambda value: int(bool(SLACK_USER_ID_RE.fullmatch(str(value)))),
+        deterministic=True,
+    )
+    legacy_count = db.execute(
+        "SELECT COUNT(*) FROM workflow_pr_conversations "
+        "WHERE NOT is_slack_user_id(owner_user_id)"
+    ).fetchone()[0]
+    if legacy_count == 0:
+        return {
+            "status": "reconciled",
+            "migrated_conversations": 0,
+            "migrated_decisions": 0,
+        }
+    try:
+        _begin_immediate(db)
+        conflict = db.execute(
+            "SELECT 1 FROM workflow_pr_conversations legacy "
+            "JOIN workflow_pr_conversations other "
+            "ON other.workspace_id = legacy.workspace_id "
+            "AND other.repo = legacy.repo "
+            "AND other.pr_number = legacy.pr_number "
+            "AND other.id != legacy.id "
+            "WHERE NOT is_slack_user_id(legacy.owner_user_id) "
+            "AND (other.owner_user_id = ? "
+            "OR NOT is_slack_user_id(other.owner_user_id)) LIMIT 1",
+            (owner_user_id,),
+        ).fetchone()
+        if conflict is not None:
+            raise AutomationError(
+                "configured owner already has a conversation for a legacy PR"
+            )
+
+        migrated_decisions = db.execute(
+            "UPDATE proposal_decisions SET owner_user_id = ? "
+            "WHERE NOT is_slack_user_id(owner_user_id) AND proposal_id IN ("
+            "SELECT p.id FROM proposal_revisions p "
+            "JOIN workflow_pr_conversations c ON c.id = p.conversation_id "
+            "WHERE NOT is_slack_user_id(c.owner_user_id))",
+            (owner_user_id,),
+        ).rowcount
+        stamp = iso(utc_now())
+        migrated_conversations = db.execute(
+            "UPDATE workflow_pr_conversations "
+            "SET owner_user_id = ?, updated_at = ? "
+            "WHERE NOT is_slack_user_id(owner_user_id)",
+            (owner_user_id, stamp),
+        ).rowcount
+        db.commit()
+        return {
+            "status": "reconciled",
+            "migrated_conversations": migrated_conversations,
+            "migrated_decisions": migrated_decisions,
+        }
     except Exception:
         db.rollback()
         raise
@@ -5260,6 +5330,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", help="override the SQLite database path")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init", help="initialize or migrate the database")
+    reconcile_owner = subparsers.add_parser(
+        "reconcile-owner",
+        help="replace invalid persisted decision-owner identities",
+    )
+    reconcile_owner.add_argument("--owner-user-id", required=True)
+
     def add_proposal_arguments(command: argparse.ArgumentParser) -> None:
         command.add_argument("--workspace-id", required=True)
         command.add_argument("--source-channel-id", required=True)
@@ -5361,6 +5437,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             with connect_db(args.db) as db:
                 version = db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
             emit({"status": "ready", "schema_version": version, "database": args.db or os.environ.get("REVIEW_HISTORY_DB", DEFAULT_DB)})
+        elif args.command == "reconcile-owner":
+            with connect_db(args.db) as db:
+                emit(
+                    reconcile_decision_owner(
+                        db,
+                        owner_user_id=args.owner_user_id,
+                    )
+                )
         elif args.command in {"propose", "review"}:
             emit(
                 propose_urls(
