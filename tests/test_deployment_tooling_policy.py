@@ -335,7 +335,16 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         linear_setup = (ROOT / "scripts" / "auth-linear.sh").read_text(encoding="utf-8")
         self.assertIn("https://mcp.linear.app/mcp/readonly", linear_setup)
         self.assertIn("mcp_oauth_callback_port=5555", linear_setup)
-        self.assertIn('127.0.0.1:${LINEAR_OAUTH_CALLBACK_HOST_PORT:-5555}:5555', COMPOSE)
+        self.assertIn("docker compose exec --user hermes paseo", linear_setup)
+        self.assertIn(
+            "TCP-LISTEN:5556,bind=0.0.0.0,reuseaddr,fork", linear_setup
+        )
+        self.assertIn("TCP:127.0.0.1:5555", linear_setup)
+        self.assertIn("socat", DOCKERFILE)
+        self.assertIn(
+            '127.0.0.1:${LINEAR_OAUTH_CALLBACK_HOST_PORT:-5555}:5556', COMPOSE
+        )
+        self.assertNotIn("network_mode: host", COMPOSE)
         self.assertNotIn("LINEAR_API_KEY", COMPOSE)
         self.assertIn('grep -F "Not logged in"', VERIFY)
 
