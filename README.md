@@ -168,8 +168,9 @@ The CLI writes its secret-bearing session under `/opt/data/.codex`; do not copy
 that directory into the repository or expose it through a bind mount.
 
 Linear authentication is intentionally completed after deployment on the VPS.
-The repository exposes Codex's fixed OAuth callback only on VPS loopback. From
-your computer, open an SSH tunnel and keep it running:
+During login, the repository temporarily bridges Codex's container-loopback
+callback listener to a Docker port published only on VPS loopback. From your
+computer, open an SSH tunnel and keep it running:
 
 ```bash
 ssh -N -L 5555:127.0.0.1:5555 USER@VPS
@@ -184,8 +185,8 @@ make auth-linear
 
 Codex registers the official read-only Linear MCP endpoint and persists its
 OAuth credentials under `/opt/data/.codex`. No Linear API key is needed. If the
-host port `5555` is occupied, change `LINEAR_OAUTH_CALLBACK_HOST_PORT` in `.env`
-and forward that host port to local port `5555`. Reviews requested before OAuth
+VPS port `5555` is occupied, change `LINEAR_OAUTH_CALLBACK_HOST_PORT` in `.env`
+and forward local port `5555` to that VPS port. Reviews requested before OAuth
 is completed still run, but their Linear snapshot is marked unavailable.
 
 Authenticate GitHub CLI as the same non-root user that runs Hermes:

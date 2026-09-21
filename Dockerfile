@@ -15,7 +15,7 @@ ENV CODEX_VERSION="${CODEX_VERSION}" \
 # GitHub's official Debian package repository.
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap ca-certificates curl util-linux docker-compose \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates curl socat util-linux docker-compose \
     && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL \
         https://cli.github.com/packages/githubcli-archive-keyring.gpg \
