@@ -27,6 +27,7 @@ SLACK_USER_ID_RE = re.compile(r"^[UW][A-Z0-9_]+$")
 DEFAULT_DB = "/opt/data/review-history/reviews.sqlite3"
 DEFAULT_SCHEMA = "/opt/review-automation/review-result.schema.json"
 PASEO_REVIEW_LABEL = "hermes-review-run"
+PASEO_REVIEW_PROVIDER = "codex-review"
 REVISION_TOKEN_PATTERN = r"P[1-9][0-9]*"
 CANDIDATE_TOKEN_PATTERN = r"C[1-9][0-9]*"
 CRITICAL_REVIEW_CATEGORIES = {
@@ -3497,7 +3498,7 @@ def invoke_codex(
         "--host",
         host,
         "--provider",
-        "codex",
+        PASEO_REVIEW_PROVIDER,
         "--mode",
         "full-access",
         "--cwd",

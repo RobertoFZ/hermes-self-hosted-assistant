@@ -22,6 +22,10 @@ if [ ! -f "$PASEO_HOME/config.json" ]; then
   install -m 0600 -o "$HERMES_UID" -g "$HERMES_GID" \
     /usr/local/share/paseo/config.json "$PASEO_HOME/config.json"
 fi
+python3 /usr/local/bin/sync-paseo-config.py \
+  /usr/local/share/paseo/config.json "$PASEO_HOME/config.json"
+chown "$HERMES_UID:$HERMES_GID" "$PASEO_HOME/config.json"
+chmod 0600 "$PASEO_HOME/config.json"
 
 if [ -S /var/run/docker.sock ]; then
   echo "Refusing to start Paseo with the host Docker socket mounted." >&2

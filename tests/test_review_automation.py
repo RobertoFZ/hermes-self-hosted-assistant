@@ -3041,6 +3041,11 @@ class ReviewAutomationTests(unittest.TestCase):
 
         self.assertEqual(result, {"repo": "acme/api"})
         command = run_command.call_args.args[0]
+        provider_index = command.index("--provider")
+        self.assertEqual(
+            command[provider_index + 1], automation.PASEO_REVIEW_PROVIDER
+        )
+        self.assertEqual(automation.PASEO_REVIEW_PROVIDER, "codex-review")
         label_index = command.index("--label")
         self.assertEqual(command[label_index + 1], "hermes-review-run=run-456")
 

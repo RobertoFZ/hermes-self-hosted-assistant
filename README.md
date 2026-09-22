@@ -183,11 +183,17 @@ in your local browser:
 make auth-linear
 ```
 
-Codex registers the official read-only Linear MCP endpoint and persists its
-OAuth credentials under `/opt/data/.codex`. No Linear API key is needed. If the
-VPS port `5555` is occupied, change `LINEAR_OAUTH_CALLBACK_HOST_PORT` in `.env`
-and forward local port `5555` to that VPS port. Reviews requested before OAuth
-is completed still run, but their Linear snapshot is marked unavailable.
+Codex registers the official read-write Linear MCP endpoint and persists its
+OAuth credentials under `/opt/data/.codex`. This allows issue description and
+status updates. No Linear API key is needed. Linear OAuth does not offer
+field-level write scopes, so the grant may expose other MCP write tools too;
+repository workflows must continue to authorize each mutation explicitly.
+Unattended PR reviews reuse this OAuth session but launch Codex against Linear's
+server-enforced `/readonly` endpoint, so write tools are unavailable in that
+workflow. If the VPS port `5555` is occupied, change
+`LINEAR_OAUTH_CALLBACK_HOST_PORT` in `.env` and forward local port `5555` to that
+VPS port. Reviews requested before OAuth is completed still run, but their
+Linear snapshot is marked unavailable.
 
 Authenticate GitHub CLI as the same non-root user that runs Hermes:
 
@@ -489,7 +495,7 @@ make chat                 # interactive terminal chat
 make codex                # open Codex in the configured monorepo root
 make auth-codex-cli       # authenticate the standalone Codex CLI
 make codex-cli-status     # verify standalone Codex authentication
-make auth-linear          # one-time read-only Linear MCP OAuth login
+make auth-linear          # one-time read-write Linear MCP OAuth login
 make check-tool-updates   # check npm for newer Codex and Paseo releases
 make paseo-status         # show Paseo daemon status
 make paseo-logs           # follow Paseo daemon logs

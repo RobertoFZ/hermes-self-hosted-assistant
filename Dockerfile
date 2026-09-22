@@ -42,4 +42,6 @@ RUN npm install --global --omit=dev --ignore-scripts "@getpaseo/cli@${PASEO_VERS
     && npm cache clean --force
 
 COPY --chmod=0755 scripts/paseo-entrypoint.sh /usr/local/bin/paseo-entrypoint
+COPY --chmod=0755 scripts/sync-paseo-config.py /usr/local/bin/sync-paseo-config.py
+COPY --chmod=0755 scripts/check-linear-mcp-capabilities.py /usr/local/bin/check-linear-mcp-capabilities
 COPY --chmod=0644 scripts/paseo-config.json /usr/local/share/paseo/config.json

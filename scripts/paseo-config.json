@@ -15,6 +15,20 @@
   "app": {
     "baseUrl": "https://app.paseo.sh"
   },
+  "agents": {
+    "providers": {
+      "codex-review": {
+        "extends": "codex",
+        "label": "Codex PR review",
+        "description": "Unattended PR reviews with server-enforced read-only Linear access",
+        "command": [
+          "codex",
+          "-c",
+          "mcp_servers.linear.url=\"https://mcp.linear.app/mcp/readonly\""
+        ]
+      }
+    }
+  },
   "features": {
     "dictation": {
       "enabled": false

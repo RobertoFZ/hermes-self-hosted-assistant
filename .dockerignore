@@ -4,3 +4,5 @@
 scripts/*
 !scripts/paseo-entrypoint.sh
 !scripts/paseo-config.json
+!scripts/sync-paseo-config.py
+!scripts/check-linear-mcp-capabilities.py
