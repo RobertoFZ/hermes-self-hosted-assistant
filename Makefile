@@ -50,7 +50,7 @@ auth-codex-cli: ## Authenticate the standalone Codex CLI with device code
 codex-cli-status: ## Verify standalone Codex CLI authentication
 	docker compose exec -T --user hermes hermes codex login status
 
-auth-linear: ## Authenticate Codex to the read-only Linear MCP endpoint
+auth-linear: ## Authenticate Codex to the read-write Linear MCP endpoint
 	./scripts/auth-linear.sh
 
 check-tool-updates: ## Check npm for newer Codex and Paseo releases

@@ -98,10 +98,11 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   done
   python3 -c "import json,sys; corpus=json.load(open(\"/opt/data/.agents/skills/pr-reviewer/evals/materiality-corpus.json\", encoding=\"utf-8\")); labels={item.get(\"label\") for item in corpus}; sys.exit(0 if labels == {\"withhold\", \"retain\"} else \"materiality-corpus.json must cover both withheld and retained findings\")"
   grep -F "materiality-corpus.json" /opt/data/.agents/skills/pr-reviewer/scripts/eval.py >/dev/null
-  codex mcp get linear | grep -F "https://mcp.linear.app/mcp/readonly" >/dev/null
+  codex mcp get linear | grep -Fx "  url: https://mcp.linear.app/mcp" >/dev/null
   linear_status="$(codex mcp list | awk '\''$1 == "linear" { print }'\'')"
   test -n "$linear_status"
   ! printf "%s\n" "$linear_status" | grep -F "Not logged in" >/dev/null
+  check-linear-mcp-capabilities >/dev/null
 '
 
 echo "Hermes private PR confirmation, schema v3, proposal quality policy, both managed cron jobs, Codex skills and plugins, Paseo, GitHub verification, and workspace are ready."

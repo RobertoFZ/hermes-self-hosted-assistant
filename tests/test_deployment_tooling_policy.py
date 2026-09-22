@@ -1,5 +1,7 @@
-import unittest
 import json
+import subprocess
+import tempfile
+import unittest
 from pathlib import Path
 
 
@@ -14,6 +16,9 @@ PASEO_ENTRYPOINT = (ROOT / "scripts" / "paseo-entrypoint.sh").read_text(
     encoding="utf-8"
 )
 PASEO_CONFIG = (ROOT / "scripts" / "paseo-config.json").read_text(encoding="utf-8")
+LINEAR_CAPABILITY_CHECK = (
+    ROOT / "scripts" / "check-linear-mcp-capabilities.py"
+).read_text(encoding="utf-8")
 DOCKERIGNORE = (ROOT / ".dockerignore").read_text(encoding="utf-8")
 UPDATE_CHECK = (ROOT / "scripts" / "check-tool-updates.sh").read_text(
     encoding="utf-8"
@@ -331,9 +336,11 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn("sync-crons: ##", MAKEFILE)
         self.assertIn("/opt/review-config/crons.json", COMPOSE)
 
-    def test_linear_context_uses_read_only_mcp_oauth(self):
+    def test_linear_context_uses_read_write_mcp_oauth(self):
         linear_setup = (ROOT / "scripts" / "auth-linear.sh").read_text(encoding="utf-8")
-        self.assertIn("https://mcp.linear.app/mcp/readonly", linear_setup)
+        self.assertIn("mcp add linear --url https://mcp.linear.app/mcp", linear_setup)
+        self.assertNotIn("https://mcp.linear.app/mcp/readonly", linear_setup)
+        self.assertNotIn("--scopes read", linear_setup)
         self.assertIn("mcp_oauth_callback_port=5555", linear_setup)
         self.assertIn("docker compose exec --user hermes paseo", linear_setup)
         self.assertIn(
@@ -347,6 +354,82 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertNotIn("network_mode: host", COMPOSE)
         self.assertNotIn("LINEAR_API_KEY", COMPOSE)
         self.assertIn('grep -F "Not logged in"', VERIFY)
+        self.assertIn("check-linear-mcp-capabilities", VERIFY)
+        self.assertIn('"mcpServerStatus/list"', LINEAR_CAPABILITY_CHECK)
+        self.assertIn('"toolsAndAuthOnly"', LINEAR_CAPABILITY_CHECK)
+        self.assertIn('tools.get("save_issue")', LINEAR_CAPABILITY_CHECK)
+        self.assertIn('{"id", "description", "state"}', LINEAR_CAPABILITY_CHECK)
+        self.assertIn("check-linear-mcp-capabilities.py", DOCKERFILE)
+        self.assertIn("!scripts/check-linear-mcp-capabilities.py", DOCKERIGNORE)
+
+    def test_unattended_reviews_force_the_read_only_linear_endpoint(self):
+        paseo_config = json.loads(PASEO_CONFIG)
+        review_provider = paseo_config["agents"]["providers"]["codex-review"]
+        self.assertEqual(review_provider["extends"], "codex")
+        self.assertEqual(
+            review_provider["command"],
+            [
+                "codex",
+                "-c",
+                'mcp_servers.linear.url="https://mcp.linear.app/mcp/readonly"',
+            ],
+        )
+        self.assertIn("sync-paseo-config.py", PASEO_ENTRYPOINT)
+        self.assertIn("sync-paseo-config.py", DOCKERFILE)
+        self.assertIn("!scripts/sync-paseo-config.py", DOCKERIGNORE)
+
+    def test_paseo_config_sync_preserves_unmanaged_settings(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            defaults_path = temporary_path / "defaults.json"
+            current_path = temporary_path / "current.json"
+            defaults_path.write_text(PASEO_CONFIG, encoding="utf-8")
+            current = {
+                "version": 1,
+                "daemon": {"listen": "127.0.0.1:9999"},
+                "agents": {
+                    "providers": {
+                        "local-provider": {
+                            "extends": "codex",
+                            "label": "Local provider",
+                        }
+                    }
+                },
+            }
+            current_path.write_text(json.dumps(current), encoding="utf-8")
+
+            subprocess.run(
+                [
+                    "python3",
+                    str(ROOT / "scripts" / "sync-paseo-config.py"),
+                    str(defaults_path),
+                    str(current_path),
+                ],
+                check=True,
+            )
+
+            synced = json.loads(current_path.read_text(encoding="utf-8"))
+            self.assertEqual(synced["daemon"], current["daemon"])
+            self.assertEqual(
+                synced["agents"]["providers"]["local-provider"],
+                current["agents"]["providers"]["local-provider"],
+            )
+            self.assertEqual(
+                synced["agents"]["providers"]["codex-review"],
+                json.loads(PASEO_CONFIG)["agents"]["providers"]["codex-review"],
+            )
+
+            synced_inode = current_path.stat().st_ino
+            subprocess.run(
+                [
+                    "python3",
+                    str(ROOT / "scripts" / "sync-paseo-config.py"),
+                    str(defaults_path),
+                    str(current_path),
+                ],
+                check=True,
+            )
+            self.assertEqual(current_path.stat().st_ino, synced_inode)
 
     def test_paseo_uses_an_isolated_tls_docker_daemon(self):
         self.assertIn("docker-compose", DOCKERFILE)

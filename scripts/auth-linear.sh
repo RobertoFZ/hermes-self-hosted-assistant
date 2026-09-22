@@ -12,11 +12,11 @@ docker compose exec --user hermes paseo /bin/sh -eu -c '
   codex mcp remove linear >/dev/null 2>&1 || true
   codex \
     -c mcp_oauth_callback_port=5555 \
-    mcp add linear --url https://mcp.linear.app/mcp/readonly
+    mcp add linear --url https://mcp.linear.app/mcp
   linear_status="$(codex mcp list | awk '\''$1 == "linear" { print }'\'')"
   if printf "%s\n" "$linear_status" | grep -F "Not logged in" >/dev/null; then
     codex \
       -c mcp_oauth_callback_port=5555 \
-      mcp login linear --scopes read
+      mcp login linear
   fi
 '
