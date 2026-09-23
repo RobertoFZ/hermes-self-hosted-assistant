@@ -1,0 +1,7 @@
+interface:
+  display_name: "Publish Company Brain Retro"
+  short_description: "Safely preview and publish the latest weekly retro"
+  default_prompt: "Use $publish-company-brain-retro to filter, preview, approve, publish, and verify the immediately preceding official /retro result in Company Brain."
+
+policy:
+  allow_implicit_invocation: false

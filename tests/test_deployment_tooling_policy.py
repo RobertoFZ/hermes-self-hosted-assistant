@@ -200,6 +200,8 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
             "pr-decision-review",
             "writing-for-agents",
             "retro",
+            "setup-company-brain-retros",
+            "publish-company-brain-retro",
         ):
             self.assertIn(
                 f"target: /opt/data/.agents/skills/{skill_name}", COMPOSE

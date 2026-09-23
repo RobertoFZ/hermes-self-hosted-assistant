@@ -12,6 +12,8 @@ CODEX_SKILLS = (
     "pr-decision-review",
     "writing-for-agents",
     "retro",
+    "setup-company-brain-retros",
+    "publish-company-brain-retro",
 )
 RETIRED_CODEX_SKILLS = (
     "auto-pr-workflow",

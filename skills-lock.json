@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "publish-company-brain-retro": {
+      "source": "reservamos/skills",
+      "sourceType": "github",
+      "skillPath": "skills/publish-company-brain-retro/SKILL.md",
+      "computedHash": "b46bd33d87873757feb1bd4845b7455ad81b65a2d598829b4473a4393088b49e"
+    },
+    "setup-company-brain-retros": {
+      "source": "reservamos/skills",
+      "sourceType": "github",
+      "skillPath": "skills/setup-company-brain-retros/SKILL.md",
+      "computedHash": "832ad454c8b44357886d4a7bcc930bc781434b0707af753cb9e199580ce38896"
+    }
+  }
+}

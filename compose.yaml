@@ -147,6 +147,14 @@ services:
         source: ./skills/retro
         target: /opt/data/.agents/skills/retro
         read_only: true
+      - type: bind
+        source: ./skills/setup-company-brain-retros
+        target: /opt/data/.agents/skills/setup-company-brain-retros
+        read_only: true
+      - type: bind
+        source: ./skills/publish-company-brain-retro
+        target: /opt/data/.agents/skills/publish-company-brain-retro
+        read_only: true
     networks:
       - default
       - paseo-docker

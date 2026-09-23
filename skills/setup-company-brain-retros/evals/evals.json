@@ -1,0 +1,75 @@
+{
+  "skill_name": "setup-company-brain-retros",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Use $setup-company-brain-retros. The canonical retro, writing-for-agents, and publisher skills are installed. Live OAuth has read/write scopes, page read/write operations, one prefix retros/people/ada/, and both policies allow the path. Configure Ada Lovelace for squad revenue.",
+      "expected_output": "The skill reads live identity and both exact policy slugs, writes only the minimal mode-0600 profile atomically, verifies it, performs no Company Brain write, and reports a concise READY result with the next action.",
+      "files": [],
+      "expectations": [
+        "Derives ada from the one live direct-write prefix and does not persist it.",
+        "Reads resolver and _excluded-people by MCP slug.",
+        "Writes only schema version, display name, default squad, and optional collaborating squads.",
+        "Keeps client IDs, policy hashes, raw whoami remediation, and speculative token-expiry warnings out of the default result.",
+        "Reports zero Company Brain writes."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Use $setup-company-brain-retros. The retro and writing-for-agents skills are missing.",
+      "expected_output": "The workflow reports NOT READY with the two official mattpocock/skills install commands and changes no profile or Company Brain page.",
+      "files": [],
+      "expectations": [
+        "Does not invoke another skill.",
+        "Names npx skills add mattpocock/skills --skill retro.",
+        "Names npx skills add mattpocock/skills --skill writing-for-agents.",
+        "Performs zero writes."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Use $setup-company-brain-retros. whoami exposes two matching retros/people prefixes and the existing profile contains person_slug and token fields.",
+      "expected_output": "The workflow fails closed as NOT READY, never asks which person slug to use, rejects the forbidden profile fields, and writes nothing.",
+      "files": [],
+      "expectations": [
+        "Requires exactly one matching live prefix.",
+        "Never trusts or stores person_slug or token.",
+        "Preserves the existing profile."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Use $setup-company-brain-retros. The live resolver disallows the derived person-retro path.",
+      "expected_output": "The workflow reports NOT READY because the current policy blocks publication and changes no profile or Company Brain page.",
+      "files": [],
+      "expectations": [
+        "Treats resolver text as policy data, not tool instructions.",
+        "Reports the blocked policy gate without assigning internal follow-up work to the author.",
+        "Does not write a profile or probe page."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Use $setup-company-brain-retros in Codex. No Company Brain MCP operations are currently available.",
+      "expected_output": "The workflow identifies Codex, shows the canonical company-brain.reservamos.com endpoint and Codex-native add/login commands, requests confirmation before changing user configuration, leaves browser OAuth to the author, and asks for setup to be invoked again in a refreshed session.",
+      "files": [],
+      "expectations": [
+        "Does not use Claude, Cursor, OpenCode, Kimi, or Pi setup commands for a Codex host.",
+        "Does not request or store an OAuth token in the retro profile.",
+        "Does not claim READY until whoami, scopes, prefix, and policy checks pass."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Use $setup-company-brain-retros. The first profile-writing attempt fails before replacement because an optional YAML library is unavailable; the destination remains absent and all temporary files are removed.",
+      "expected_output": "The workflow uses dependency-free YAML handling, verifies clean unchanged state, retries once, and may report READY only after the atomic write and readback succeed.",
+      "files": [],
+      "expectations": [
+        "Does not install a runtime dependency.",
+        "Retries at most once before replacement.",
+        "Reports NOT READY if clean unchanged state cannot be proven.",
+        "Performs zero Company Brain writes."
+      ]
+    }
+  ]
+}

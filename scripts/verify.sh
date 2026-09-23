@@ -65,7 +65,9 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
     pr-reviewer \
     pr-decision-review \
     writing-for-agents \
-    retro
+    retro \
+    setup-company-brain-retros \
+    publish-company-brain-retro
   do
     skill_path="/opt/data/.agents/skills/$skill_name"
     test -f "$skill_path/SKILL.md"

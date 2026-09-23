@@ -27,6 +27,7 @@ through ignored runtime files.
 - Pinned OpenSpec CLI for strict validation of specification changes
 - Compound Engineering `3.24.0` installed into the persistent Codex profile
 - Vendored `writing-for-agents` and explicit-only experimental `retro` skills
+- Explicit-only Company Brain retro setup and publishing skills
 - Persistent Hermes state, credentials, sessions, skills, and review checkout
 - Review-only Slack channel and delegated-reviewer DMs
 - Optional Telegram or other Hermes gateway integrations
@@ -66,7 +67,7 @@ Important runtime locations:
 | Review workspace | `/opt/data/repos/reserhub-revenue-full` | Never |
 | Verified review history | `/opt/data/review-history/reviews.sqlite3` | Never |
 | Managed Hermes cron IDs | `/opt/data/cron/repository-managed-jobs.json` | Never |
-| Repository-managed Codex skills | `skills/{codex-self-review,pr-reviewer,pr-decision-review,writing-for-agents,retro}` | Yes |
+| Repository-managed Codex skills | `skills/{codex-self-review,pr-reviewer,pr-decision-review,writing-for-agents,retro,setup-company-brain-retros,publish-company-brain-retro}` | Yes |
 | Compound Engineering plugin cache and registration | `/opt/data/.codex` | Never |
 | Hermes orchestration skills | `skills/{codex-pr-review,review-digest,review-reminder}` | Yes |
 | Cron source of truth | `config/crons.json` | Yes |
@@ -521,8 +522,10 @@ The repository copies are canonical. They include `codex-self-review`,
 `pr-reviewer`, the explicit-only `pr-decision-review` workflow vendored from
 `reservamos/skills@94c241ed26e6d6cc04cbbc8333232dcfd00a7c51`, and Matt
 Pocock's `writing-for-agents` and `retro` skills vendored from
-`mattpocock/skills@3cca18b368ae95cdbdebbff572ccafa662551015`. To install
-them as the current user's global Codex skills:
+`mattpocock/skills@3cca18b368ae95cdbdebbff572ccafa662551015`. The explicit-only
+`setup-company-brain-retros` and `publish-company-brain-retro` skills are
+vendored from `reservamos/skills@8dfd39cc83b4f0d71a40236feeb3ae4a14504f52`.
+To install them as the current user's global Codex skills:
 
 ```bash
 make install-global-skill
@@ -547,6 +550,10 @@ Invoke the decision workflow explicitly:
 ```text
 Use $pr-decision-review on PR 123.
 ```
+
+Use `$setup-company-brain-retros` to configure and check Company Brain retro
+publishing prerequisites. After an explicit `/retro` completes, use
+`$publish-company-brain-retro` to prepare and request approval for publication.
 
 It is intended for PRs authored by someone other than the authenticated GitHub
 user and always requires an explicit human action before publishing comments

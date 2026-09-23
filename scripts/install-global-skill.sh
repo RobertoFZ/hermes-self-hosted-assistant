@@ -10,6 +10,8 @@ pr-reviewer
 pr-decision-review
 writing-for-agents
 retro
+setup-company-brain-retros
+publish-company-brain-retro
 "
 retired_workflow_skills="
 auto-pr-workflow

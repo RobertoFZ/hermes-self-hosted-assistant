@@ -1,0 +1,7 @@
+interface:
+  display_name: "Setup Company Brain Retros"
+  short_description: "Verify OAuth and configure safe retro metadata"
+  default_prompt: "Use $setup-company-brain-retros to verify my live Company Brain retro access and configure the minimal local publishing profile."
+
+policy:
+  allow_implicit_invocation: false
