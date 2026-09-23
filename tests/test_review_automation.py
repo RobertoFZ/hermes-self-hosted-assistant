@@ -1169,7 +1169,7 @@ class ReviewAutomationTests(unittest.TestCase):
                     "SELECT MAX(version) FROM schema_migrations"
                 ).fetchone()[0]
 
-        self.assertEqual(version, 3)
+        self.assertEqual(version, 4)
         self.assertTrue(
             {
                 "cleanup_status",

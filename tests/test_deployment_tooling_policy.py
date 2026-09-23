@@ -249,7 +249,7 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
     def test_runtime_verification_checks_private_workflow_contract(self):
         self.assertIn("review-reminder", VERIFY)
         self.assertIn("schema_version", VERIFY)
-        self.assertIn("== 3", VERIFY)
+        self.assertIn("== 4", VERIFY)
         self.assertIn("review-result.schema.json", VERIFY)
         self.assertIn("workflow_pr_conversations", VERIFY)
         self.assertIn("slack-pr-review-gate", VERIFY)

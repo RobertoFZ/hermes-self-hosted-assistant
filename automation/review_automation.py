@@ -481,6 +481,9 @@ def migrate(db: sqlite3.Connection) -> None:
             repo TEXT NOT NULL,
             pr_number INTEGER NOT NULL,
             pr_url TEXT NOT NULL,
+            pr_title TEXT NOT NULL DEFAULT '',
+            pr_author TEXT NOT NULL DEFAULT '',
+            pr_body TEXT NOT NULL DEFAULT '',
             dm_channel_id TEXT,
             thread_ts TEXT,
             created_at TEXT NOT NULL,
@@ -660,6 +663,22 @@ def migrate(db: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?)",
         (iso(utc_now()),),
     )
+    conversation_columns = {
+        str(row["name"])
+        for row in db.execute(
+            "PRAGMA table_info(workflow_pr_conversations)"
+        ).fetchall()
+    }
+    for name in ("pr_title", "pr_author", "pr_body"):
+        if name not in conversation_columns:
+            db.execute(
+                f"ALTER TABLE workflow_pr_conversations ADD COLUMN {name} "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+    db.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (4, ?)",
+        (iso(utc_now()),),
+    )
     db.commit()
 
 
@@ -742,6 +761,9 @@ def get_or_create_pr_conversation(
     repo: str,
     pr_number: int,
     pr_url: str,
+    pr_title: str = "",
+    pr_author: str = "",
+    pr_body: str = "",
 ) -> tuple[str, bool]:
     """Reuse one private conversation for a PR across requests and heads."""
     if not all((workspace_id, owner_user_id, repo, pr_url)) or pr_number < 1:
@@ -754,8 +776,8 @@ def get_or_create_pr_conversation(
             """
             INSERT OR IGNORE INTO workflow_pr_conversations(
                 id, workspace_id, owner_user_id, repo, pr_number, pr_url,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                pr_title, pr_author, pr_body, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 conversation_id,
@@ -764,6 +786,9 @@ def get_or_create_pr_conversation(
                 repo,
                 pr_number,
                 pr_url,
+                pr_title,
+                pr_author,
+                pr_body,
                 now,
                 now,
             ),
@@ -780,13 +805,28 @@ def get_or_create_pr_conversation(
         ).fetchone()
         if row is None:
             raise AutomationError("failed to persist PR conversation")
-        if str(row["pr_url"]) != pr_url:
+        current = db.execute(
+            "SELECT pr_url, pr_title, pr_author, pr_body "
+            "FROM workflow_pr_conversations WHERE id = ?",
+            (row["id"],),
+        ).fetchone()
+        if current is None:
+            raise AutomationError("failed to load PR conversation metadata")
+        if any(
+            str(current[key] or "") != value
+            for key, value in (
+                ("pr_url", pr_url),
+                ("pr_title", pr_title),
+                ("pr_author", pr_author),
+                ("pr_body", pr_body),
+            )
+        ):
             db.execute(
                 """
-                UPDATE workflow_pr_conversations
-                SET pr_url = ?, updated_at = ? WHERE id = ?
+                UPDATE workflow_pr_conversations SET pr_url = ?, pr_title = ?,
+                    pr_author = ?, pr_body = ?, updated_at = ? WHERE id = ?
                 """,
-                (pr_url, now, row["id"]),
+                (pr_url, pr_title, pr_author, pr_body, now, row["id"]),
             )
         db.commit()
         return str(row["id"]), created
@@ -4143,6 +4183,7 @@ def proposal_context(
         "still_open_candidate_ids": [],
         "new_candidate_ids": [],
     }
+    result["linear"] = structured.get("linear") or {}
     result["limitations"] = list(structured.get("limitations") or [])
     return result
 
@@ -4153,11 +4194,47 @@ def format_private_proposal(context: Mapping[str, Any]) -> str:
     token = str(context.get("revision_token") or "")
     head = str(context.get("head_sha") or "")
     action = str(context.get("proposed_action") or "comment").upper()
+    pr_url = str(conversation.get("pr_url") or "")
+    repo = str(conversation.get("repo") or "unknown/repository")
+    pr_number = conversation.get("pr_number")
+    pr_title = str(conversation.get("pr_title") or "Untitled PR")
+    pr_title = pr_title.replace("<", "‹").replace(">", "›")
+    pr_identity = f"{repo}#{pr_number} · {pr_title}"
+    pr_link = f"<{pr_url}|{pr_identity}>" if pr_url else pr_identity
+    author = str(conversation.get("pr_author") or "Not available")
+    author_line = (
+        f"<https://github.com/{author}|@{author}>"
+        if author != "Not available"
+        else author
+    )
+    description = " ".join(str(conversation.get("pr_body") or "").split())
+    if description:
+        description = description.replace("<", "‹").replace(">", "›")
+        if len(description) > 500:
+            description = description[:497].rstrip() + "…"
+    else:
+        description = "No description provided."
+    linear = context.get("linear") or {}
+    linear_url = str(linear.get("url") or "")
+    linear_key = str(linear.get("key") or "")
+    linear_title = str(linear.get("title") or "")
+    linear_label = " · ".join(part for part in (linear_key, linear_title) if part)
+    if linear_url and linear_url.startswith("https://linear.app/"):
+        linear_line = f"<{linear_url}|{linear_label or 'Open Linear issue'}>"
+    elif linear_label:
+        linear_line = linear_label
+    elif str(linear.get("fetch_status") or "") == "unavailable":
+        linear_line = "Linked issue could not be fetched."
+    else:
+        linear_line = "No linked issue found."
     lines = [
-        f"*{conversation.get('repo')} #{conversation.get('pr_number')} — {token}*",
-        f"Head: `{head[:12]}`",
+        f"*PR review · {action}*",
+        pr_link,
+        f"Author: {author_line}",
+        f"Description: {description}",
+        f"Linear: {linear_line}",
+        f"Reviewed head: `{head[:12]}`",
         f"Objective: {context.get('objective') or 'Not provided'}",
-        f"Proposal: {action}",
         str(context.get("summary") or "Review proposal ready."),
     ]
     delta = context.get("delta") or {}
@@ -4488,6 +4565,9 @@ def propose_one(
         repo=pr.repo,
         pr_number=pr.number,
         pr_url=pr.url,
+        pr_title=pr.title,
+        pr_author=pr.author_login,
+        pr_body=pr.body,
     )
     associate_request_conversation(db, request_id, conversation_id, position=position)
     if pr.author_login.lower() == login.lower():
