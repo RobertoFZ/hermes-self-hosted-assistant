@@ -4,7 +4,7 @@ x-hermes-runtime: &hermes-runtime
       dockerfile: Dockerfile
       args:
         HERMES_BASE_IMAGE: "${HERMES_BASE_IMAGE:-nousresearch/hermes-agent:latest}"
-        CODEX_VERSION: "${CODEX_VERSION:-0.149.1}"
+        CODEX_VERSION: "${CODEX_VERSION:-0.156.0}"
         OPENSPEC_VERSION: "${OPENSPEC_VERSION:-1.10.0}"
         PASEO_VERSION: "${PASEO_VERSION:-0.5.2}"
     image: "${HERMES_LOCAL_IMAGE:-hermes-self-hosted-assistant:local}"

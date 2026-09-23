@@ -140,7 +140,7 @@ make sync-codex-plugins
 make sync-crons
 ```
 
-The derived image installs pinned standalone Codex (`0.149.1` by default), its
+The derived image installs pinned standalone Codex (`0.156.0` by default), its
 Linux `bubblewrap` sandbox prerequisite, OpenSpec (`1.10.0`), and Paseo (`0.5.2`).
 Override `CODEX_VERSION`, `OPENSPEC_VERSION`, or `PASEO_VERSION` only after
 validating the new version.
