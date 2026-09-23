@@ -105,4 +105,4 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   check-linear-mcp-capabilities >/dev/null
 '
 
-echo "Hermes private PR confirmation, schema v3, proposal quality policy, both managed cron jobs, Codex skills and plugins, Paseo, GitHub verification, and workspace are ready."
+echo "Hermes private PR confirmation, schema v4, proposal quality policy, both managed cron jobs, Codex skills and plugins, Paseo, GitHub verification, and workspace are ready."
