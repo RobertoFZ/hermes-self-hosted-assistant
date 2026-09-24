@@ -16,7 +16,7 @@ ENV CODEX_VERSION="${CODEX_VERSION}" \
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        bash bubblewrap ca-certificates curl git openssh-client socat util-linux python3 passwd \
+        bash bubblewrap ca-certificates curl git openssh-client procps socat util-linux python3 passwd \
     && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg \
         -o /etc/apt/keyrings/docker.asc \
