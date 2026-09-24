@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 DOCKERFILE = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+PASEO_DOCKERFILE = (ROOT / "Dockerfile.paseo").read_text(encoding="utf-8")
 COMPOSE = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 VERIFY = (ROOT / "scripts" / "verify.sh").read_text(encoding="utf-8")
 MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
@@ -37,6 +39,190 @@ REVIEW_RESULT_SCHEMA_JSON = json.loads(REVIEW_RESULT_SCHEMA)
 
 
 class DeploymentToolingPolicyTests(unittest.TestCase):
+    def test_setup_menu_selects_each_bootstrap_target(self):
+        targets = {
+            "1\n": ("bootstrap-hermes", 0),
+            "2\n": ("bootstrap-paseo", 0),
+            "3\n": ("bootstrap", 0),
+            "4\n": ("", 2),
+            "": ("", 2),
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            fake_make = Path(temporary_directory) / "make"
+            fake_make.write_text("#!/bin/sh\nprintf '%s\\n' \"$1\"\n")
+            fake_make.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{temporary_directory}{os.pathsep}{environment['PATH']}"
+
+            for selection, (expected_output, expected_status) in targets.items():
+                with self.subTest(selection=selection):
+                    result = subprocess.run(
+                        [str(ROOT / "scripts" / "setup.sh")],
+                        input=selection,
+                        text=True,
+                        capture_output=True,
+                        env=environment,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, expected_status)
+                    if expected_output:
+                        self.assertTrue(result.stdout.rstrip().endswith(expected_output))
+
+    def test_compose_profiles_select_the_expected_services(self):
+        self.assertRegex(
+            COMPOSE,
+            r"(?ms)^  hermes:\n    profiles: \[\"hermes-only\", \"full\"\]",
+        )
+        self.assertRegex(
+            COMPOSE,
+            r"(?ms)^  paseo-docker:\n    profiles: \[\"codex-paseo\", \"full\"\]",
+        )
+        self.assertRegex(
+            COMPOSE,
+            r"(?ms)^  paseo:\n    profiles: \[\"codex-paseo\", \"full\"\]",
+        )
+
+    def test_restart_recreates_only_services_from_the_installed_profiles(self):
+        restart = MAKEFILE.split("restart:", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("ps --all -q hermes", restart)
+        self.assertIn("--profile hermes-only up -d --force-recreate hermes", restart)
+        self.assertIn("ps --all -q paseo paseo-docker", restart)
+        self.assertIn("--profile codex-paseo up -d --force-recreate paseo", restart)
+        self.assertNotIn("--profile full down", restart)
+
+    def test_hermes_only_switch_is_blocked_for_configured_pr_review(self):
+        self.assertRegex(REVIEW_ENV_EXAMPLE, r"(?m)^REVIEW_MONOREPO_ROOT=$")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            review_env = temporary_path / ".review.env"
+            fake_bin = temporary_path / "bin"
+            fake_bin.mkdir()
+            fake_docker = fake_bin / "docker"
+            fake_docker.write_text(
+                r"""#!/bin/sh
+case "$1" in
+  compose)
+    printf '%s\n' "{\"services\":{\"hermes\":{\"image\":\"hermes-self-hosted-assistant:local\",\"volumes\":[{\"source\":\"hermes-data\",\"target\":\"/opt/data\"}]}},\"volumes\":{\"hermes-data\":{\"name\":\"${MOCK_VOLUME_NAME:-self-assistant-hermes-data}\"}}}"
+    exit 0
+    ;;
+  info) exit "${MOCK_DOCKER_INFO_STATUS:-0}" ;;
+  volume)
+    [ "$2" = ls ] || exit 2
+    [ "${MOCK_VOLUME_LIST_STATUS:-0}" = 0 ] || exit "$MOCK_VOLUME_LIST_STATUS"
+    [ "${MOCK_VOLUME_PRESENT:-1}" = 1 ] && printf '%s\n' "${MOCK_VOLUME_NAME:-self-assistant-hermes-data}"
+    exit 0
+    ;;
+  run) exit "${MOCK_CRON_STATE_STATUS:-1}" ;;
+esac
+exit 2
+"""
+            )
+            fake_docker.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{fake_bin}{os.pathsep}{environment['PATH']}"
+
+            review_env.write_text("REVIEW_MONOREPO_ROOT=/opt/review-workspace\n")
+            blocked = subprocess.run(
+                [str(ROOT / "scripts" / "guard-hermes-only.sh")],
+                cwd=temporary_path,
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+            self.assertEqual(blocked.returncode, 1, blocked.stderr)
+            self.assertIn("review jobs and reminders require the Paseo service", blocked.stderr)
+
+            review_env.write_text("REVIEW_MONOREPO_ROOT=\n")
+            environment["MOCK_CRON_STATE_STATUS"] = "0"
+            blocked = subprocess.run(
+                [str(ROOT / "scripts" / "guard-hermes-only.sh")],
+                cwd=temporary_path,
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+            self.assertEqual(blocked.returncode, 1, blocked.stderr)
+            self.assertIn("managed Hermes cron jobs are persisted", blocked.stderr)
+
+            environment["MOCK_CRON_STATE_STATUS"] = "1"
+            allowed = subprocess.run(
+                [str(ROOT / "scripts" / "guard-hermes-only.sh")],
+                cwd=temporary_path,
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+            self.assertEqual(allowed.returncode, 0)
+
+            environment["MOCK_VOLUME_PRESENT"] = "0"
+            missing_volume = subprocess.run(
+                [str(ROOT / "scripts" / "guard-hermes-only.sh")],
+                cwd=temporary_path,
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+            self.assertEqual(missing_volume.returncode, 0)
+
+            environment["MOCK_VOLUME_PRESENT"] = "1"
+            environment["MOCK_DOCKER_INFO_STATUS"] = "1"
+            docker_error = subprocess.run(
+                [str(ROOT / "scripts" / "guard-hermes-only.sh")],
+                cwd=temporary_path,
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+            self.assertEqual(docker_error.returncode, 2)
+            self.assertIn("Could not reach Docker", docker_error.stderr)
+
+            environment["MOCK_DOCKER_INFO_STATUS"] = "0"
+            environment["MOCK_VOLUME_LIST_STATUS"] = "2"
+            volume_list_error = subprocess.run(
+                [str(ROOT / "scripts" / "guard-hermes-only.sh")],
+                cwd=temporary_path,
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+            self.assertEqual(volume_list_error.returncode, 2)
+            self.assertIn("Could not list Docker volumes", volume_list_error.stderr)
+
+            environment["MOCK_VOLUME_LIST_STATUS"] = "0"
+            environment["MOCK_VOLUME_PRESENT"] = "1"
+            environment["MOCK_CRON_STATE_STATUS"] = "125"
+            inspect_error = subprocess.run(
+                [str(ROOT / "scripts" / "guard-hermes-only.sh")],
+                cwd=temporary_path,
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+            self.assertEqual(inspect_error.returncode, 2)
+            self.assertIn("Could not inspect the persisted Hermes cron state", inspect_error.stderr)
+
+            review_env.write_text("REVIEW_MONOREPO_ROOT=\n")
+            (temporary_path / ".env").write_text('HERMES_DATA_VOLUME="quoted-hermes-data"\n')
+            environment["MOCK_VOLUME_NAME"] = "quoted-hermes-data"
+            environment["MOCK_CRON_STATE_STATUS"] = "0"
+            quoted_volume = subprocess.run(
+                [str(ROOT / "scripts" / "guard-hermes-only.sh")],
+                cwd=temporary_path,
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+            self.assertEqual(quoted_volume.returncode, 1)
+            self.assertIn("managed Hermes cron jobs are persisted", quoted_volume.stderr)
+
     def test_review_result_schema_uses_paseo_compatible_draft(self):
         self.assertIn("http://json-schema.org/draft-07/schema#", REVIEW_RESULT_SCHEMA)
         self.assertNotIn("draft/2020-12", REVIEW_RESULT_SCHEMA)
@@ -87,12 +273,12 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         )
 
     def test_codex_cli_is_pinned_in_the_image(self):
-        self.assertIn("ARG CODEX_VERSION=0.156.0", DOCKERFILE)
+        self.assertIn("ARG CODEX_VERSION=0.156.0", PASEO_DOCKERFILE)
         self.assertIn(
-            "apt-get install -y --no-install-recommends bubblewrap", DOCKERFILE
+            "bubblewrap", PASEO_DOCKERFILE
         )
-        self.assertIn('@openai/codex@${CODEX_VERSION}', DOCKERFILE)
-        self.assertIn("--ignore-scripts", DOCKERFILE)
+        self.assertIn('@openai/codex@${CODEX_VERSION}', PASEO_DOCKERFILE)
+        self.assertIn("--ignore-scripts", PASEO_DOCKERFILE)
         self.assertIn('CODEX_VERSION: "${CODEX_VERSION:-0.156.0}"', COMPOSE)
 
     def test_runtime_verification_checks_codex_version_and_auth(self):
@@ -161,9 +347,9 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertNotIn("npm install", UPDATE_CHECK)
 
     def test_openspec_is_pinned_in_the_image(self):
-        self.assertIn("ARG OPENSPEC_VERSION=1.10.0", DOCKERFILE)
-        self.assertIn('@fission-ai/openspec@${OPENSPEC_VERSION}', DOCKERFILE)
-        self.assertIn("--ignore-scripts", DOCKERFILE)
+        self.assertIn("ARG OPENSPEC_VERSION=1.10.0", PASEO_DOCKERFILE)
+        self.assertIn('@fission-ai/openspec@${OPENSPEC_VERSION}', PASEO_DOCKERFILE)
+        self.assertIn("--ignore-scripts", PASEO_DOCKERFILE)
         self.assertIn('OPENSPEC_VERSION: "${OPENSPEC_VERSION:-1.10.0}"', COMPOSE)
 
     def test_runtime_verification_checks_the_openspec_version(self):
@@ -349,7 +535,7 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
             "TCP-LISTEN:5556,bind=0.0.0.0,reuseaddr,fork", linear_setup
         )
         self.assertIn("TCP:127.0.0.1:5555", linear_setup)
-        self.assertIn("socat", DOCKERFILE)
+        self.assertIn("socat", PASEO_DOCKERFILE)
         self.assertIn(
             '127.0.0.1:${LINEAR_OAUTH_CALLBACK_HOST_PORT:-5555}:5556', COMPOSE
         )
@@ -361,7 +547,7 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
         self.assertIn('"toolsAndAuthOnly"', LINEAR_CAPABILITY_CHECK)
         self.assertIn('tools.get("save_issue")', LINEAR_CAPABILITY_CHECK)
         self.assertIn('{"id", "description", "state"}', LINEAR_CAPABILITY_CHECK)
-        self.assertIn("check-linear-mcp-capabilities.py", DOCKERFILE)
+        self.assertIn("check-linear-mcp-capabilities.py", PASEO_DOCKERFILE)
         self.assertIn("!scripts/check-linear-mcp-capabilities.py", DOCKERIGNORE)
 
     def test_unattended_reviews_force_the_read_only_linear_endpoint(self):
@@ -377,7 +563,7 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
             ],
         )
         self.assertIn("sync-paseo-config.py", PASEO_ENTRYPOINT)
-        self.assertIn("sync-paseo-config.py", DOCKERFILE)
+        self.assertIn("sync-paseo-config.py", PASEO_DOCKERFILE)
         self.assertIn("!scripts/sync-paseo-config.py", DOCKERIGNORE)
 
     def test_paseo_config_sync_preserves_unmanaged_settings(self):
@@ -434,8 +620,9 @@ class DeploymentToolingPolicyTests(unittest.TestCase):
             self.assertEqual(current_path.stat().st_ino, synced_inode)
 
     def test_paseo_uses_an_isolated_tls_docker_daemon(self):
-        self.assertIn("docker-compose", DOCKERFILE)
-        self.assertIn("docker compose version", DOCKERFILE)
+        self.assertIn("docker-compose-plugin", PASEO_DOCKERFILE)
+        self.assertIn("docker-ce-cli", PASEO_DOCKERFILE)
+        self.assertIn("docker compose version", PASEO_DOCKERFILE)
         self.assertIn('image: "${PASEO_DOCKER_IMAGE:-docker:29.7.2-dind}"', COMPOSE)
         self.assertIn("privileged: true", COMPOSE)
         self.assertIn('DOCKER_HOST: "tcp://paseo-docker:2376"', COMPOSE)

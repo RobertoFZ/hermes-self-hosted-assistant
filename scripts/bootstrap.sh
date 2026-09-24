@@ -41,6 +41,8 @@ set_if_empty .env HERMES_DASHBOARD_BASIC_AUTH_PASSWORD "$(openssl rand -hex 24)"
 set_if_empty .env HERMES_DASHBOARD_BASIC_AUTH_SECRET "$(openssl rand -hex 32)"
 set_if_empty .env PASEO_PASSWORD "$(openssl rand -hex 32)"
 set_if_empty .env PASEO_HOST_PORT 6767
+set_if_empty .env PASEO_BASE_IMAGE node:22-bookworm-slim
+set_if_empty .env PASEO_LOCAL_IMAGE self-assistant-paseo:local
 set_if_empty .env LINEAR_OAUTH_CALLBACK_HOST_PORT 5555
 chmod 600 .env
 
@@ -56,4 +58,4 @@ set_if_empty .review.env REVIEW_PASEO_TIMEOUT 45m
 set_if_empty .review.env REVIEW_HISTORY_DB /opt/data/review-history/reviews.sqlite3
 chmod 600 .review.env
 
-echo "Bootstrap files are ready. Run 'make build' and 'make up'."
+echo "Bootstrap files are ready. Choose 'make bootstrap-hermes', 'make bootstrap-paseo', or 'make bootstrap'."

@@ -1,5 +1,6 @@
 **
 !Dockerfile
+!Dockerfile.paseo
 !scripts/
 scripts/*
 !scripts/paseo-entrypoint.sh

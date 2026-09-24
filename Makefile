@@ -1,40 +1,76 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help init bootstrap build up down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status auth-linear check-tool-updates paseo-up paseo-status paseo-logs paseo-register-workspace paseo-pair paseo-provider-status auth-github gateway-setup sync-skills sync-codex-plugins sync-crons cron-status digest-preview review-history-init review-recover review-cleanup install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
+.PHONY: help setup init bootstrap bootstrap-hermes bootstrap-paseo build build-hermes build-paseo up up-hermes up-paseo down restart status logs chat codex auth-codex select-model auth-codex-cli codex-cli-status auth-linear check-tool-updates paseo-up paseo-status paseo-logs paseo-register-workspace paseo-pair paseo-provider-status auth-github gateway-setup sync-skills sync-codex-plugins sync-crons cron-status digest-preview review-history-init review-recover review-cleanup install-global-skill apply-review-policy clone-workspace github-status workspace-status workspace-sync verify test volume-backup volume-restore
 
 help: ## Show the available commands
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-24s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-build: ## Build the Hermes image with GitHub CLI
-	docker compose build --pull
+setup: ## Choose and bootstrap Hermes, Codex/Paseo, or the full stack
+	./scripts/setup.sh
+
+build: ## Build both runtime images for a full installation
+	docker compose --profile full build --pull
+
+build-hermes: ## Build only the Hermes image
+	docker compose --profile hermes-only build --pull hermes
+
+build-paseo: ## Build only the Codex/Paseo image
+	docker compose --profile codex-paseo build --pull paseo
 
 init: ## Create ignored local configuration files without overwriting them
 	./scripts/bootstrap.sh
 
-bootstrap: init build up sync-skills sync-codex-plugins sync-crons ## Build and start a fresh installation
-	@printf '%s\n' "Next: authenticate Hermes, Codex CLI, and GitHub; clone the workspace; then run make paseo-register-workspace and make paseo-pair"
+bootstrap: init build up sync-skills sync-codex-plugins sync-crons ## Build and start the full Hermes + Codex/Paseo installation
+	@printf '%s\n' "Next: authenticate Hermes, Codex CLI, Linear, and GitHub; configure the gateway; clone the workspace; then run make paseo-register-workspace and make paseo-pair"
 
-up: ## Start Hermes in the background
-	docker compose up -d
+bootstrap-hermes: init build-hermes up-hermes ## Build and start Hermes without Codex/Paseo
+	@printf '%s\n' "Next: run make auth-codex, make select-model, and make gateway-setup"
+
+bootstrap-paseo: init build-paseo up-paseo ## Build and start standalone Codex + Paseo
+	@printf '%s\n' "Next: run make auth-codex-cli and make paseo-pair; run make auth-github for private GitHub repositories"
+
+up: ## Start the full Hermes + Codex/Paseo installation
+	docker compose --profile full up -d
+
+up-hermes: ## Start the Hermes-only profile
+	./scripts/guard-hermes-only.sh
+	docker compose --profile full down
+	docker compose --profile hermes-only up -d
+
+up-paseo: ## Start the Codex + Paseo profile
+	docker compose --profile full down
+	docker compose --profile codex-paseo up -d
 
 down: ## Stop Hermes while preserving its persistent data volume
-	docker compose down
+	docker compose --profile full down
 
-restart: ## Recreate Hermes while preserving authentication and data
-	docker compose down
-	docker compose up -d
+restart: ## Recreate the currently installed services while preserving authentication and data
+	@set -eu; \
+	started=0; \
+	if [ -n "$$(docker compose --profile full ps --all -q hermes)" ]; then \
+		docker compose --profile hermes-only up -d --force-recreate hermes; \
+		started=1; \
+	fi; \
+	if [ -n "$$(docker compose --profile full ps --all -q paseo paseo-docker)" ]; then \
+		docker compose --profile codex-paseo up -d --force-recreate paseo; \
+		started=1; \
+	fi; \
+	if [ "$$started" -eq 0 ]; then \
+		printf '%s\n' "No installed services found. Use 'make up', 'make up-hermes', or 'make up-paseo'." >&2; \
+		exit 1; \
+	fi
 
-status: ## Show the Hermes container status
-	docker compose ps
+status: ## Show the full-stack container status
+	docker compose --profile full ps
 
 logs: ## Follow Hermes logs (Ctrl-C to stop)
-	docker compose logs --tail=100 -f hermes
+	docker compose --profile full logs --tail=100 -f hermes
 
 chat: ## Open an interactive Hermes terminal chat
 	docker compose exec hermes hermes chat
 
 codex: ## Open Codex CLI in the configured review monorepo root
-	docker compose exec --user hermes hermes /bin/sh -eu -c \
+	docker compose exec --user hermes paseo /bin/sh -eu -c \
 		': "$${REVIEW_MONOREPO_ROOT:?set it in .review.env}"; cd "$$REVIEW_MONOREPO_ROOT"; exec codex'
 
 auth-codex: ## Authenticate a ChatGPT/Codex subscription interactively
@@ -45,10 +81,10 @@ select-model: ## Select the authenticated Hermes model interactively
 	docker compose exec hermes hermes model
 
 auth-codex-cli: ## Authenticate the standalone Codex CLI with device code
-	docker compose exec --user hermes hermes codex login --device-auth
+	docker compose exec --user hermes paseo codex login --device-auth
 
 codex-cli-status: ## Verify standalone Codex CLI authentication
-	docker compose exec -T --user hermes hermes codex login status
+	docker compose exec -T --user hermes paseo codex login status
 
 auth-linear: ## Authenticate Codex to the read-write Linear MCP endpoint
 	./scripts/auth-linear.sh
@@ -57,14 +93,14 @@ check-tool-updates: ## Check npm for newer Codex and Paseo releases
 	./scripts/check-tool-updates.sh
 
 paseo-up: ## Start the Paseo daemon and bundled web UI
-	docker compose up -d paseo
+	docker compose --profile codex-paseo up -d paseo
 
 paseo-status: ## Show Paseo daemon status
 	docker compose exec -T paseo curl --fail --silent --show-error \
 		http://127.0.0.1:6767/api/health
 
 paseo-logs: ## Follow Paseo daemon logs (Ctrl-C to stop)
-	docker compose logs --tail=100 -f paseo
+	docker compose --profile codex-paseo logs --tail=100 -f paseo
 
 paseo-register-workspace: ## Register the configured monorepo with Paseo
 	docker compose exec -T --user hermes paseo /bin/sh -eu -c \
@@ -78,10 +114,10 @@ paseo-provider-status: ## Verify Paseo can launch the authenticated Codex CLI
 	docker compose exec -T --user hermes paseo \
 		paseo provider diagnostic --host 127.0.0.1:6767 --json codex
 
-auth-github: ## Authenticate GitHub CLI interactively as the Hermes user
-	docker compose exec --user hermes hermes \
+auth-github: ## Authenticate GitHub CLI interactively for shared Hermes/Paseo use
+	docker compose exec --user hermes paseo \
 		gh auth login --hostname github.com --git-protocol https --web
-	docker compose exec -T --user hermes hermes gh auth setup-git
+	docker compose exec -T --user hermes paseo gh auth setup-git
 
 gateway-setup: ## Configure Slack, Telegram, or another messaging platform
 	docker compose exec hermes hermes gateway setup
@@ -126,15 +162,15 @@ clone-workspace: ## Clone or verify the configured monorepo and submodules
 	./scripts/clone-workspace.sh
 
 github-status: ## Verify GitHub CLI authentication without printing the token
-	docker compose exec -T --user hermes hermes \
+	docker compose exec -T --user hermes paseo \
 		gh auth status --active --hostname github.com
 
 workspace-status: ## Verify the review monorepo and initialized submodules
-	docker compose exec -T --user hermes hermes \
+	docker compose exec -T --user hermes paseo \
 		/opt/review-workspace/prepare-workspace.sh --check
 
 workspace-sync: ## Safely refresh review refs without changing checked-out files
-	docker compose exec -T --user hermes hermes \
+	docker compose exec -T --user hermes paseo \
 		/opt/review-workspace/prepare-workspace.sh --fetch
 
 verify: ## Verify provider, GitHub, skill, plugin, and workspace configuration

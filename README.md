@@ -14,8 +14,10 @@ through ignored runtime files.
 ## Included boundaries
 
 - OpenAI Codex provider authenticated through ChatGPT OAuth
+- Separate Hermes and Codex/Paseo runtime images
 - Pinned standalone Codex CLI with its own persistent ChatGPT OAuth
-- Pinned Paseo daemon and web UI for using that Codex CLI remotely
+- Pinned Paseo daemon and web UI for using Codex remotely
+- Selectable Hermes-only, Codex/Paseo-only, and full-stack Compose profiles
 - Hermes-to-Paseo delegation of exact PR review requests
 - GitHub CLI OAuth for read-only proposal analysis and explicitly confirmed
   `APPROVE` or `COMMENT` actions
@@ -80,17 +82,37 @@ not authenticate the other. Both locations live in the persistent named volume.
 
 Requirements: Docker Engine with Compose, Make, Python 3, and OpenSSL.
 
-Create the ignored local configuration files:
+Start the guided terminal setup:
 
 ```bash
-make init
+make setup
 ```
 
-`make init` copies the examples when the ignored files are absent and fills only
-missing generated credentials, including `PASEO_PASSWORD`. Existing values are
-never overwritten.
+It creates the ignored configuration files and asks which services to install.
+It fills only missing generated credentials, including `PASEO_PASSWORD`; any
+existing values are preserved. To prepare the files without starting services,
+run `make init`.
 
-Fill in these deployment-specific values in `.review.env`:
+For scripted setups, use one of these choices directly:
+
+```bash
+make bootstrap-hermes # Hermes assistant only
+make bootstrap-paseo  # Codex CLI + Paseo only
+make bootstrap        # Full Hermes + Codex/Paseo stack, including PR review
+```
+
+Each command builds only the image it needs. The full stack is the default for
+existing installs and is required for the repository's Slack PR-review workflow.
+The minimal profiles do not require Slack IDs or the review workspace settings.
+Use the matching `make up-hermes` or `make up-paseo` command to switch profiles
+later; `make up` starts the full stack. `make up-hermes` refuses to stop Paseo
+when `REVIEW_MONOREPO_ROOT` is configured, because persisted PR review jobs and
+reminders need Paseo. Disable that review setup and its managed jobs before
+switching away from the full stack. Full-stack Slack review requires the
+`.review.env` values below before the review policy is enabled.
+
+For the full PR-review setup, fill in these deployment-specific values in
+`.review.env`:
 
 ```dotenv
 SLACK_ALLOWED_USERS=OWNER_ID,REVIEWER_ID,TRUSTED_REVIEW_BOT_ID
@@ -131,20 +153,20 @@ attachments. Other bots and bot status messages remain ignored.
 when a human explicitly addresses one of them without also mentioning Hermes,
 Hermes ignores that message even if Slack supplies PR context from the thread.
 
-Build and start:
+Build and start the full stack with `make bootstrap`:
 
 ```bash
-make build
-make up
-make sync-skills
-make sync-codex-plugins
-make sync-crons
+make bootstrap
 ```
 
-The derived image installs pinned standalone Codex (`0.156.0` by default), its
-Linux `bubblewrap` sandbox prerequisite, OpenSpec (`1.10.0`), and Paseo (`0.5.2`).
-Override `CODEX_VERSION`, `OPENSPEC_VERSION`, or `PASEO_VERSION` only after
-validating the new version.
+For an existing installation, `make build` and `make up` rebuild and start the
+full stack without rerunning first-install synchronization.
+
+The Hermes image contains Hermes, GitHub CLI, and the Paseo client used to
+delegate work. The separate Paseo image contains the standalone Codex CLI,
+OpenSpec, and Paseo daemon. The default pins are Codex `0.156.0`, OpenSpec
+`1.10.0`, and Paseo `0.5.2`; override these only after validating the new
+versions.
 
 Authenticate the ChatGPT/Codex subscription interactively:
 
@@ -196,7 +218,9 @@ workflow. If the VPS port `5555` is occupied, change
 VPS port. Reviews requested before OAuth is completed still run, but their
 Linear snapshot is marked unavailable.
 
-Authenticate GitHub CLI as the same non-root user that runs Hermes:
+Authenticate GitHub CLI in Paseo. Its CLI configuration and native Git helper
+are stored in the shared persistent volume, so Hermes uses the same GitHub
+identity in the full profile:
 
 ```bash
 make auth-github
@@ -487,9 +511,17 @@ configuration, Paseo state, and repository data remain in the named volume.
 
 ```bash
 make help                 # list targets
+make setup                # interactive setup choice
+make bootstrap-hermes     # build and start Hermes only
+make bootstrap-paseo      # build and start Codex + Paseo only
+make bootstrap            # build and start the full PR-review stack
+make build-hermes         # build the Hermes image only
+make build-paseo          # build the Codex/Paseo image only
 make up                   # start Hermes and Paseo
+make up-hermes            # start Hermes only
+make up-paseo             # start Codex + Paseo only
 make down                 # stop without deleting data
-make restart              # recreate while preserving the volume
+make restart              # recreate the currently installed profile services
 make status               # container status
 make logs                 # follow gateway logs
 make chat                 # interactive terminal chat
@@ -588,10 +620,10 @@ in the ignored `.env` file.
 
 ## Paseo web UI
 
-Paseo runs as a separate non-root Compose service while sharing `/opt/data` with
-Hermes. Codex sessions launched from Paseo therefore use the same standalone
-Codex login, GitHub CLI login, Git configuration, tools, and persistent
-monorepo. Hermes and Paseo still have independent process lifecycles.
+Paseo runs in its own image as a separate non-root Compose service. In the full
+profile it shares `/opt/data` with Hermes, so Codex sessions use the same
+standalone Codex login, GitHub CLI login, Git configuration, tools, and
+persistent monorepo. Hermes and Paseo still have independent process lifecycles.
 
 Paseo includes Docker Compose but does not mount `/var/run/docker.sock`. It
 connects over mutual TLS to a dedicated `paseo-docker` Docker-in-Docker sidecar.
@@ -627,6 +659,35 @@ ssh -N -L 6767:127.0.0.1:6767 USER@VPS
 Do not publish port 6767 directly. Use `make paseo-status` and
 `make paseo-provider-status` to diagnose daemon or Codex availability.
 
+### Upgrade from the combined Hermes/Paseo image
+
+The image split keeps the persistent volume names and container data paths
+unchanged. The existing Hermes image name remains the Hermes image name; the
+Paseo service moves to `self-assistant-paseo:local`. The first `make init` after
+updating the checkout adds that new image setting to an existing `.env` without
+replacing its current values.
+
+On the VPS, back up the stopped shared data volume, then rebuild and recreate
+the full stack:
+
+```bash
+make down
+make volume-backup BACKUP_FILE=/absolute/secure/path/hermes-data-before-image-split.tgz
+git pull --ff-only origin main
+make init
+make build
+make up
+make verify
+```
+
+The Hermes, Paseo, and nested Docker containers will be recreated from their
+separate images. The `hermes-data`, `paseo-docker-data`, and
+`paseo-docker-certs` volumes are preserved under their existing names. Do not
+run `docker compose down -v`. Keep the backup until the new services pass
+verification. For rollback, check out the previous repository revision, run
+`make build`, and start the full stack again; the persistent volumes are
+compatible with the combined image.
+
 ### Migrate an existing host-socket installation
 
 Preserve `hermes-data` and recreate the services without deleting volumes:
@@ -636,7 +697,7 @@ git pull --ff-only origin main
 make down
 make volume-backup BACKUP_FILE=/absolute/secure/path/hermes-data-before-dind.tgz
 make build
-docker compose up -d
+make up
 make paseo-status
 make paseo-provider-status
 docker compose exec -T --user hermes paseo docker info
@@ -721,9 +782,10 @@ encrypted, access-controlled backup storage.
   Compose-only TLS network and never publish port 2376 on the VPS.
 - Treat Paseo users as administrators of the nested Docker daemon and the shared
   `/opt/data` workspace. They cannot control the host daemon through this setup.
-- Review all dependency/image upgrades before deployment. The current Dockerfile
-  tracks the upstream Hermes `latest` image; pin a tested release or digest for
-  production reproducibility.
+- Review all dependency/image upgrades before deployment. `Dockerfile` tracks
+  the upstream Hermes `latest` image, and `Dockerfile.paseo` defaults to the
+  official Node 22 slim image; pin tested releases or digests for production
+  reproducibility.
 ## References
 
 - [Hermes providers](https://hermes-agent.nousresearch.com/docs/integrations/providers)

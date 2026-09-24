@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-docker compose config --quiet
+docker compose --profile full config --quiet
 docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   : "${REVIEW_MONOREPO_ROOT:?set it in .review.env}"
   : "${SLACK_REVIEW_CHANNEL_ID:?set it in .review.env}"
@@ -18,11 +18,7 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   # Exercise the same authenticated cross-container WebSocket path used by
   # codex-pr-review. A localhost-only check would miss hostname rejections.
   paseo project ls --host "$PASEO_HOST" --json | grep -F "$REVIEW_MONOREPO_ROOT" >/dev/null
-  command -v bwrap >/dev/null
-  test "$(codex --version)" = "codex-cli $CODEX_VERSION"
-  codex login status
-  codex plugin list --json | python3 -c "import json,sys; items=json.load(sys.stdin).get(\"installed\", []); desired=[x for x in items if x.get(\"pluginId\") == \"compound-engineering@compound-engineering-plugin\" and x.get(\"version\") == \"3.24.0\" and x.get(\"enabled\") is True]; conflicts=[x for x in items if x.get(\"name\") == \"compound-engineering\" and x.get(\"pluginId\") != \"compound-engineering@compound-engineering-plugin\" and x.get(\"enabled\") is True]; sys.exit(0 if len(desired) == 1 and not conflicts else \"Pinned Compound Engineering plugin is not ready\")"
-  test "$(openspec --version)" = "$OPENSPEC_VERSION"
+  test "$(paseo --version)" = "$PASEO_VERSION"
   hermes skills list | grep -F codex-pr-review >/dev/null
   hermes skills list | grep -F review-digest >/dev/null
   hermes skills list | grep -F review-reminder >/dev/null
@@ -52,11 +48,13 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   docker run --rm \
     --mount "type=bind,src=$REVIEW_MONOREPO_ROOT,dst=/workspace,readonly" \
     alpine:3.22 test -f /workspace/README.md
-  test "$(paseo --version)" = "$PASEO_VERSION"
-  test "$(openspec --version)" = "$OPENSPEC_VERSION"
-  (cd "$REVIEW_MONOREPO_ROOT" && openspec context --json >/dev/null)
+  command -v bwrap >/dev/null
+  test "$(codex --version)" = "codex-cli $CODEX_VERSION"
   codex login status
   codex plugin list --json | python3 -c "import json,sys; items=json.load(sys.stdin).get(\"installed\", []); desired=[x for x in items if x.get(\"pluginId\") == \"compound-engineering@compound-engineering-plugin\" and x.get(\"version\") == \"3.24.0\" and x.get(\"enabled\") is True]; conflicts=[x for x in items if x.get(\"name\") == \"compound-engineering\" and x.get(\"pluginId\") != \"compound-engineering@compound-engineering-plugin\" and x.get(\"enabled\") is True]; sys.exit(0 if len(desired) == 1 and not conflicts else \"Pinned Compound Engineering plugin is not ready\")"
+  test "$(openspec --version)" = "$OPENSPEC_VERSION"
+  test "$(paseo --version)" = "$PASEO_VERSION"
+  (cd "$REVIEW_MONOREPO_ROOT" && openspec context --json >/dev/null)
   curl --fail --silent --show-error http://127.0.0.1:6767/api/health >/dev/null
   paseo provider diagnostic --host 127.0.0.1:6767 --json codex >/dev/null
   paseo project ls --host 127.0.0.1:6767 --json | grep -F "$REVIEW_MONOREPO_ROOT" >/dev/null

@@ -16,7 +16,10 @@ case "$HERMES_UID:$HERMES_GID" in
 esac
 
 # Prepare only Paseo's state directory. Hermes remains responsible for the
-# rest of the shared volume, and the daemon itself never runs as root.
+# rest of the shared volume. Ensure the volume root is writable for Paseo-only
+# installs without changing ownership of existing Hermes data. The daemon
+# itself never runs as root.
+chown "$HERMES_UID:$HERMES_GID" /opt/data
 install -d -m 0700 -o "$HERMES_UID" -g "$HERMES_GID" "$PASEO_HOME"
 if [ ! -f "$PASEO_HOME/config.json" ]; then
   install -m 0600 -o "$HERMES_UID" -g "$HERMES_GID" \

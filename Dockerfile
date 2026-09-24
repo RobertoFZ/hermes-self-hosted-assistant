@@ -3,19 +3,15 @@ FROM ${HERMES_BASE_IMAGE}
 
 USER root
 
-ARG CODEX_VERSION=0.156.0
-ARG OPENSPEC_VERSION=1.10.0
 ARG PASEO_VERSION=0.5.2
-ENV CODEX_VERSION="${CODEX_VERSION}" \
-    OPENSPEC_VERSION="${OPENSPEC_VERSION}" \
-    PASEO_VERSION="${PASEO_VERSION}" \
-    OPENSPEC_TELEMETRY=0
+ENV PASEO_VERSION="${PASEO_VERSION}"
 
-# Install runtime prerequisites and Docker Compose, then install GitHub CLI from
-# GitHub's official Debian package repository.
+# Hermes delegates PR review tasks to Paseo and uses GitHub CLI for the review
+# workflow. The Codex runtime and its larger build dependencies live in the
+# separate Paseo image.
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap ca-certificates curl socat util-linux docker-compose \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL \
         https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -25,23 +21,10 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends gh \
-    && docker compose version >/dev/null \
     && rm -rf /var/lib/apt/lists/*
 
-# Install a reproducible standalone Codex CLI for explicit agent delegation.
-RUN npm install --global --omit=dev --ignore-scripts "@openai/codex@${CODEX_VERSION}" \
-    && test "$(codex --version)" = "codex-cli ${CODEX_VERSION}"
-
-# Match the OpenSpec version pinned by the Reserhub review workspace.
-RUN npm install --global --omit=dev --ignore-scripts "@fission-ai/openspec@${OPENSPEC_VERSION}" \
-    && test "$(openspec --version)" = "$OPENSPEC_VERSION"
-
-# Paseo runs Codex app-server behind its authenticated local/relay web UI.
+# Hermes needs only the Paseo client to delegate work; Codex itself runs in the
+# isolated Paseo service image.
 RUN npm install --global --omit=dev --ignore-scripts "@getpaseo/cli@${PASEO_VERSION}" \
     && test "$(paseo --version)" = "$PASEO_VERSION" \
     && npm cache clean --force
-
-COPY --chmod=0755 scripts/paseo-entrypoint.sh /usr/local/bin/paseo-entrypoint
-COPY --chmod=0755 scripts/sync-paseo-config.py /usr/local/bin/sync-paseo-config.py
-COPY --chmod=0755 scripts/check-linear-mcp-capabilities.py /usr/local/bin/check-linear-mcp-capabilities
-COPY --chmod=0644 scripts/paseo-config.json /usr/local/share/paseo/config.json

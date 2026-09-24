@@ -11,8 +11,8 @@ case "$archive" in
   *) echo "Backup path must be absolute." >&2; exit 2 ;;
 esac
 
-if [ -n "$(docker compose ps -q hermes 2>/dev/null || true)" ]; then
-  echo "Stop Hermes with 'make down' before restoring a backup." >&2
+if [ -n "$(docker compose --profile full ps -q hermes paseo 2>/dev/null || true)" ]; then
+  echo "Stop Hermes and Paseo with 'make down' before restoring a backup." >&2
   exit 1
 fi
 
