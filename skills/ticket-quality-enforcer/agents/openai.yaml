@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ticket Quality Enforcer"
+  short_description: "Score backlog tickets and report quality gaps"
+  default_prompt: "Use $ticket-quality-enforcer to audit unstarted Linear tickets against the quality rubric in dry-run mode."

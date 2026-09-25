@@ -162,6 +162,14 @@ services:
         target: /opt/data/.agents/skills/publish-company-brain-retro
         read_only: true
       - type: bind
+        source: ./skills/ticket-quality-enforcer
+        target: /opt/data/.agents/skills/ticket-quality-enforcer
+        read_only: true
+      - type: bind
+        source: ./skills/ticket-quality-fixer
+        target: /opt/data/.agents/skills/ticket-quality-fixer
+        read_only: true
+      - type: bind
         source: ./skills/pr-reviewer/scripts/prepare-workspace.sh
         target: /opt/review-workspace/prepare-workspace.sh
         read_only: true

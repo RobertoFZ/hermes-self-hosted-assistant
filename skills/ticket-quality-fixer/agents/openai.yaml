@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ticket Quality Fixer"
+  short_description: "Improve Linear or Notion ticket quality"
+  default_prompt: "Use $ticket-quality-fixer to improve the specified Linear ticket or Notion page and show the proposed changes first."
