@@ -76,6 +76,7 @@ There is no other path to an approval proposal. A single correctness / security 
      the key (e.g. `RM-903`). Read the description and acceptance criteria.
    - Use the ticket to sharpen — not expand — the review: does the diff actually deliver the ticket's stated behavior? Is there **scope creep** (changes unrelated to the ticket)? Are acceptance criteria **untested** (feeds `test_coverage`) or **unmet** (feeds `correctness`)? Don't invent requirements the ticket doesn't state, and don't change the gate or categories — the ticket is context, not a new rule.
    - If you can't resolve a ticket (no key, Linear MCP unavailable — e.g. headless/cron run), proceed with the PR description alone and note that the ticket wasn't available.
+   - Build `product_context` from those sources and the changed files. Keep the product reason separate from the review objective. State the current and planned behavior only when supported, identify what this PR actually delivers, and mark an artifacts-only PR as `specification`. Use `null` or `unknown` for missing intent. `related_prs` may contain only links explicitly present in this PR's description; `source_paths` cite relevant files read at the reviewed head.
 
 4. **Load the right repository guidance for the stack:**
    - **Monorepo root** (`reserhub-revenue-full`): run the root `bootstrap` skill
@@ -186,6 +187,16 @@ For every GitHub PR analysis, emit exactly one JSON object matching `automation/
   "baseline_head_sha": null,
   "event": "APPROVE",
   "published": false,
+  "product_context": {
+    "change_type": "feature",
+    "why": "Operators need the new status in the Admin App.",
+    "current_behavior": "Operators use the legacy status page.",
+    "planned_behavior": "Operators can inspect status in the Admin App.",
+    "pr_scope": "This PR implements the status endpoint and screen.",
+    "delivery_stage": "implementation",
+    "related_prs": [],
+    "source_paths": ["src/status.py"]
+  },
   "objective": "Añadir el estado calculado sin cambiar el contrato existente.",
   "summary": "La implementación satisface el objetivo sin riesgos materiales detectados.",
   "findings": [],
@@ -212,6 +223,7 @@ For every GitHub PR analysis, emit exactly one JSON object matching `automation/
 ```
 
 - `event` is the proposed event, `"APPROVE"` or `"COMMENT"`; it is never executed here. `published` is always `false`.
+- `product_context` explains the product purpose and this PR's delivery stage before the owner sees the review decision. Its claims must be grounded in the PR, linked issue, or reviewed files; missing intent stays unknown. `related_prs` lists only URLs from the PR description.
 - Every finding has a stable `candidate_id`, aligned severity/category, Spanish `body`, concise `evidence`, and `blocking` consistent with the gate.
 - Inline findings require complete GitHub diff coordinates: `path`, `line`, and `side`; include `start_line` and `start_side` together only for a multi-line range and otherwise set both to null. Non-inline findings set all five coordinate fields to null.
 - `delta` always distinguishes `addressed_candidate_ids`, `still_open_candidate_ids`, and `new_candidate_ids`; an unavailable exact comparison is explicit.

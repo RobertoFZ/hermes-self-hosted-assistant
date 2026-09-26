@@ -10,6 +10,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import textwrap
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -3577,6 +3578,12 @@ def invoke_codex(
         "Do not discover or review any other pull request. Do not submit a review, approve, "
         "comment, merge, close, or call any GitHub write endpoint. Bind the proposal to head "
         f"{pr.head_sha}. Include related Linear context when it can be derived and fetched. "
+        "Fill product_context from the PR description, linked issue, and files at this "
+        "head. Explain the product problem, current and planned behavior, and what this "
+        "PR itself contains. Distinguish specification-only work from implementation. "
+        "Use null and unknown when evidence is absent; never substitute the review "
+        "task for the product reason. Include related PRs only when their URLs appear "
+        "in the PR description, and cite relevant changed file paths in source_paths. "
         "Return only the structured result required by the supplied output schema with "
         "published set to false."
     )
@@ -3668,6 +3675,22 @@ def validate_result(result: Mapping[str, Any], pr: PullRequest) -> None:
         raise AutomationError("Codex result head SHA does not match GitHub")
 
 
+def _linked_related_pr(url: str, pr_body: str) -> bool:
+    return bool(
+        PR_URL_RE.fullmatch(url)
+        and re.search(rf"(?<![A-Za-z0-9]){re.escape(url)}/?(?=$|[\s)\]>|.,;:!?#])", pr_body)
+    )
+
+
+def _safe_product_source_path(path: Any) -> bool:
+    return bool(
+        isinstance(path, str)
+        and re.fullmatch(r"[A-Za-z0-9_./-]+", path)
+        and not path.startswith("/")
+        and ".." not in path.split("/")
+    )
+
+
 def validate_proposal_result(result: Mapping[str, Any], pr: PullRequest) -> None:
     validate_result(result, pr)
     if result.get("published") is not False:
@@ -3676,6 +3699,21 @@ def validate_proposal_result(result: Mapping[str, Any], pr: PullRequest) -> None
         raise AutomationError("Codex proposal event is invalid")
     if not str(result.get("objective") or "").strip():
         raise AutomationError("Codex proposal objective is required")
+    product = result.get("product_context")
+    if product is not None:
+        if not isinstance(product, Mapping) or not str(product.get("pr_scope") or "").strip():
+            raise AutomationError("Codex product context requires a PR scope")
+        if str(product.get("delivery_stage") or "") not in {
+            "specification", "implementation", "mixed", "unknown"
+        }:
+            raise AutomationError("Codex product context has an invalid delivery stage")
+        for related in product.get("related_prs") or []:
+            related_url = str(related.get("url") or "") if isinstance(related, Mapping) else ""
+            if not _linked_related_pr(related_url, pr.body):
+                raise AutomationError("related PR is not linked from the requested PR")
+        for path in product.get("source_paths") or []:
+            if not _safe_product_source_path(path):
+                raise AutomationError("product context source path is invalid")
     if not isinstance(result.get("findings"), list):
         raise AutomationError("Codex proposal findings must be a list")
     for finding in result["findings"]:
@@ -4275,8 +4313,24 @@ def proposal_context(
         "new_candidate_ids": [],
     }
     result["linear"] = structured.get("linear") or {}
+    result["product_context"] = structured.get("product_context") or {}
     result["limitations"] = list(structured.get("limitations") or [])
     return result
+
+
+def _slack_plain(value: Any, *, limit: int = 700) -> str:
+    plain = str(value or "").replace("<", "‹").replace(">", "›")
+    return textwrap.shorten(plain, width=limit, placeholder="…")
+
+
+def _stored_evidence_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return str(value or "")
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    return decoded if isinstance(decoded, str) else value
 
 
 def format_private_proposal(context: Mapping[str, Any]) -> str:
@@ -4298,13 +4352,6 @@ def format_private_proposal(context: Mapping[str, Any]) -> str:
         if author != "Not available"
         else author
     )
-    description = " ".join(str(conversation.get("pr_body") or "").split())
-    if description:
-        description = description.replace("<", "‹").replace(">", "›")
-        if len(description) > 500:
-            description = description[:497].rstrip() + "…"
-    else:
-        description = "No description provided."
     linear = context.get("linear") or {}
     linear_url = str(linear.get("url") or "")
     linear_key = str(linear.get("key") or "")
@@ -4318,20 +4365,78 @@ def format_private_proposal(context: Mapping[str, Any]) -> str:
         linear_line = "Linked issue could not be fetched."
     else:
         linear_line = "No linked issue found."
-    lines = [
-        f"*PR review · {action}*",
-        pr_link,
-        f"Author: {author_line}",
-        f"Description: {description}",
-        f"Linear: {linear_line}",
-        f"Reviewed head: `{head[:12]}`",
-        f"Objective: {context.get('objective') or 'Not provided'}",
-        str(context.get("summary") or "Review proposal ready."),
-    ]
-    if context.get("requested_focus"):
-        requested_focus = " ".join(str(context["requested_focus"]).split())
-        requested_focus = requested_focus.replace("<", "‹").replace(">", "›")
-        lines.insert(-1, f"Requested focus: {requested_focus[:500]}")
+    product = context.get("product_context") or {}
+    if not isinstance(product, Mapping):
+        product = {}
+    focus = _slack_plain(context.get("requested_focus"), limit=500)
+    if product:
+        lines = [
+            f"*PR review · proposed {action} · {token}*",
+            pr_link,
+            f"Author: {author_line}",
+            f"Reviewed head: `{head[:12]}`",
+            f"Linear: {linear_line}",
+            "\n*Why this change exists*",
+            _slack_plain(product.get("why"))
+            or "Reason not established from the PR or linked issue.",
+        ]
+        product_summary = _slack_plain(linear.get("product_summary"))
+        if product_summary and product_summary != _slack_plain(product.get("why")):
+            lines.append(f"Linear context: {product_summary}")
+        lines.extend([
+            "\n*What changes*",
+            f"Today: {_slack_plain(product.get('current_behavior')) or 'Not established.'}",
+            f"Planned: {_slack_plain(product.get('planned_behavior')) or 'Not established.'}",
+            "\n*What this PR contains*",
+            _slack_plain(product.get("pr_scope")) or "Scope not established.",
+            f"Change: {(_slack_plain(product.get('change_type')) or 'unknown').capitalize()} · "
+            f"Stage: {(_slack_plain(product.get('delivery_stage')) or 'unknown').capitalize()}",
+        ])
+        if product.get("delivery_stage") == "specification":
+            lines.append("This review does not verify the product implementation.")
+        for related in (product.get("related_prs") or [])[:5]:
+            if not isinstance(related, Mapping):
+                continue
+            related_url = str(related.get("url") or "")
+            if not _linked_related_pr(related_url, str(conversation.get("pr_body") or "")):
+                continue
+            role = _slack_plain(related.get("role")) or "Related PR"
+            lines.append(f"Related: <{related_url}|{role}>")
+        if focus:
+            lines.append(f"Requested focus: {focus}")
+        lines.extend([
+            "\n*Review result*",
+            _slack_plain(context.get("summary")) or "Review proposal ready.",
+        ])
+        objective = _slack_plain(context.get("objective"))
+        if objective:
+            lines.append(f"Review scope: {objective}")
+        source_paths = []
+        for source_path in product.get("source_paths") or []:
+            if _safe_product_source_path(source_path):
+                source_paths.append(f"`{source_path}`")
+        if source_paths:
+            lines.append("Source paths: " + ", ".join(source_paths[:3]))
+    else:
+        description = " ".join(str(conversation.get("pr_body") or "").split())
+        if description:
+            description = description.replace("<", "‹").replace(">", "›")
+            if len(description) > 500:
+                description = description[:497].rstrip() + "…"
+        else:
+            description = "No description provided."
+        lines = [
+            f"*PR review · {action}*",
+            pr_link,
+            f"Author: {author_line}",
+            f"Description: {description}",
+            f"Linear: {linear_line}",
+            f"Reviewed head: `{head[:12]}`",
+            f"Objective: {context.get('objective') or 'Not provided'}",
+            str(context.get("summary") or "Review proposal ready."),
+        ]
+        if focus:
+            lines.insert(-1, f"Requested focus: {focus}")
     delta = context.get("delta") or {}
     if delta and str(delta.get("status")) != "initial":
         lines.append(
@@ -4339,6 +4444,10 @@ def format_private_proposal(context: Mapping[str, Any]) -> str:
             + str(delta.get("status")).replace("_", " ")
             + f" (baseline `{str(context.get('baseline_head_sha') or '')[:12]}`)"
         )
+        if delta.get("summary"):
+            lines.append(_slack_plain(delta["summary"]))
+    for limitation in context.get("limitations") or []:
+        lines.append("Limitation: " + _slack_plain(limitation))
     findings = [
         item for item in context.get("findings", []) if item.get("active", True)
     ]
@@ -4353,6 +4462,8 @@ def format_private_proposal(context: Mapping[str, Any]) -> str:
                 f"• `{finding.get('candidate_id')}` {finding.get('severity')} "
                 f"{location}{edited} — {finding.get('body')}"
             )
+            if finding.get("evidence"):
+                lines.append("  Evidence: " + _slack_plain(_stored_evidence_text(finding["evidence"])))
     else:
         lines.append("No material candidate comments.")
     commands = [f"`skip {token}`"]

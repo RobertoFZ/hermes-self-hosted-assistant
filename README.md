@@ -319,6 +319,11 @@ The Slack policy behaves as follows:
 - Each requested PR gets one top-level DM summary for the decision owner; its
   questions, proposal changes, reminders, re-reviews, and action stay in that
   message thread.
+- New proposal DMs lead with the product reason, current and planned behavior,
+  and the actual scope of this PR before the proposed decision. Specification
+  work is labeled separately from implementation, linked PRs come from the PR
+  description, and missing intent is stated as unknown. Older stored proposals
+  keep their original summary format.
 - A question in that thread may inspect the PR diff and code at the reviewed
   commit read-only. For endpoint questions, Hermes may also inspect configured
   sibling submodules and a verified related frontend PR at its exact head.

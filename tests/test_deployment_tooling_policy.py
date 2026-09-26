@@ -235,6 +235,7 @@ exit 2
             {"type": "boolean", "const": False},
         )
         self.assertIn("objective", schema["required"])
+        self.assertIn("product_context", schema["required"])
         self.assertIn("baseline_head_sha", schema["required"])
         self.assertIn("delta", schema["required"])
 

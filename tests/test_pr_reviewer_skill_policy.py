@@ -72,6 +72,19 @@ class PRReviewerSkillPolicyTests(unittest.TestCase):
             },
         )
 
+    def test_product_context_names_purpose_scope_and_delivery_stage(self):
+        product = REVIEW_RESULT_SCHEMA["properties"]["product_context"]
+        self.assertIn("product_context", REVIEW_RESULT_SCHEMA["required"])
+        self.assertEqual(
+            set(product["required"]),
+            {
+                "change_type", "why", "current_behavior", "planned_behavior",
+                "pr_scope", "delivery_stage", "related_prs", "source_paths",
+            },
+        )
+        self.assertIn("product_context", SKILL)
+        self.assertIn("product_context", WORKFLOW)
+
     def test_scratch_artifacts_stay_inside_hermes_safe_root(self):
         for content in (SKILL, WORKFLOW, GH_RUNBOOK):
             self.assertIn("/opt/data/pr-reviewer-tmp", content)

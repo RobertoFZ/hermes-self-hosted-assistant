@@ -10,6 +10,7 @@
     "baseline_head_sha",
     "event",
     "published",
+    "product_context",
     "objective",
     "summary",
     "findings",
@@ -24,6 +25,46 @@
     "baseline_head_sha": {"type": ["string", "null"], "minLength": 7},
     "event": {"type": "string", "enum": ["APPROVE", "COMMENT"]},
     "published": {"type": "boolean", "const": false},
+    "product_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "change_type", "why", "current_behavior", "planned_behavior",
+        "pr_scope", "delivery_stage", "related_prs", "source_paths"
+      ],
+      "properties": {
+        "change_type": {
+          "type": "string",
+          "enum": ["feature", "fix", "architecture", "maintenance", "mixed", "unknown"]
+        },
+        "why": {"type": ["string", "null"], "maxLength": 1000},
+        "current_behavior": {"type": ["string", "null"], "maxLength": 1000},
+        "planned_behavior": {"type": ["string", "null"], "maxLength": 1000},
+        "pr_scope": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "delivery_stage": {
+          "type": "string",
+          "enum": ["specification", "implementation", "mixed", "unknown"]
+        },
+        "related_prs": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["url", "role"],
+            "properties": {
+              "url": {"type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*$"},
+              "role": {"type": "string", "minLength": 1, "maxLength": 100}
+            }
+          }
+        },
+        "source_paths": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {"type": "string", "minLength": 1, "maxLength": 300}
+        }
+      }
+    },
     "objective": {"type": "string", "minLength": 1},
     "summary": {"type": "string", "minLength": 1},
     "findings": {

@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import tempfile
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import unittest
@@ -14,6 +15,144 @@ from automation import review_automation as automation
 
 
 class ReviewAutomationTests(unittest.TestCase):
+    def test_private_summary_explains_product_change_and_pr_scope(self):
+        head = "a" * 40
+        backend_url = "https://github.com/acme/api/pull/73"
+        context = {
+            "conversation": {
+                "repo": "acme/root",
+                "pr_number": 42,
+                "pr_url": "https://github.com/acme/root/pull/42",
+                "pr_title": "Crawler Status migration",
+                "pr_author": "developer",
+                "pr_body": f"Early artifacts PR. Backend: {backend_url}",
+            },
+            "revision_token": "P2",
+            "head_sha": head,
+            "baseline_head_sha": "b" * 40,
+            "proposed_action": "approve",
+            "objective": "Review the OpenSpec artifacts",
+            "summary": "No material issues in the specification files.",
+            "product_context": {
+                "change_type": "feature",
+                "why": "Staff still use the legacy task page.",
+                "current_behavior": "The Admin App only shows worker statistics.",
+                "planned_behavior": "Admins can inspect in-flight crawler tasks.",
+                "pr_scope": "Six OpenSpec files; no product code.",
+                "delivery_stage": "specification",
+                "related_prs": [{"url": backend_url, "role": "Backend implementation"}],
+                "source_paths": ["openspec/changes/crawler-status/proposal.md"],
+            },
+            "linear": {
+                "key": "PCM-45",
+                "title": "Crawler Status",
+                "product_summary": "Move task monitoring into the Admin App.",
+            },
+            "delta": {
+                "status": "available",
+                "summary": "Clarified scheduled-task behavior.",
+                "addressed_candidate_ids": ["C1"],
+                "still_open_candidate_ids": [],
+                "new_candidate_ids": [],
+            },
+            "findings": [],
+            "limitations": ["Implementation PRs were not reviewed."],
+        }
+
+        message = automation.format_private_proposal(context)
+
+        self.assertLess(message.index("*Why this change exists*"), message.index("*Review result*"))
+        self.assertIn("Staff still use the legacy task page.", message)
+        self.assertIn("The Admin App only shows worker statistics.", message)
+        self.assertIn("Admins can inspect in-flight crawler tasks.", message)
+        self.assertIn("Six OpenSpec files; no product code.", message)
+        self.assertIn("Backend implementation", message)
+        self.assertIn(backend_url, message)
+        self.assertIn("Clarified scheduled-task behavior.", message)
+        self.assertIn("Implementation PRs were not reviewed.", message)
+        self.assertIn("Source paths: `openspec/changes/crawler-status/proposal.md`", message)
+        self.assertNotIn("/blob/", message)
+        self.assertIn("`approve P2`", message)
+        self.assertNotIn("Description: Early artifacts PR", message)
+
+    def test_private_summary_decodes_stored_evidence(self):
+        message = automation.format_private_proposal({
+            "conversation": {"repo": "acme/api", "pr_number": 42},
+            "revision_token": "P1",
+            "head_sha": "a" * 40,
+            "findings": [{
+                "candidate_id": "C1",
+                "severity": "major",
+                "path": "src/api.py",
+                "line": 8,
+                "body": "The endpoint skips authorization.",
+                "evidence": json.dumps("El código permite acceso sin permiso."),
+            }],
+        })
+
+        self.assertIn("Evidence: El código permite acceso sin permiso.", message)
+        self.assertNotIn("\\u00f3", message)
+
+    def test_private_summary_marks_missing_product_reason(self):
+        context = {
+            "conversation": {"repo": "acme/api", "pr_number": 42},
+            "revision_token": "P1",
+            "head_sha": "a" * 40,
+            "proposed_action": "comment",
+            "product_context": {
+                "change_type": "unknown",
+                "why": None,
+                "current_behavior": None,
+                "planned_behavior": None,
+                "pr_scope": "Changes a service handler.",
+                "delivery_stage": "unknown",
+                "related_prs": [],
+                "source_paths": [],
+            },
+        }
+
+        message = automation.format_private_proposal(context)
+
+        self.assertIn("Reason not established from the PR or linked issue.", message)
+        self.assertIn("Changes a service handler.", message)
+
+    def test_product_context_rejects_unlinked_related_pr(self):
+        pr = automation.PullRequest(
+            url="https://github.com/acme/root/pull/42",
+            repo="acme/root",
+            number=42,
+            title="Crawler Status migration",
+            body="Specification only.",
+            head_sha="a" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        result = {
+            "repo": pr.repo,
+            "pr_number": pr.number,
+            "head_sha": pr.head_sha,
+            "event": "APPROVE",
+            "published": False,
+            "objective": "Review the specification",
+            "findings": [],
+            "product_context": {
+                "pr_scope": "Specification only.",
+                "delivery_stage": "specification",
+                "related_prs": [{"url": "https://github.com/acme/api/pull/73", "role": "Backend"}],
+                "source_paths": [],
+            },
+        }
+
+        with self.assertRaisesRegex(automation.AutomationError, "not linked"):
+            automation.validate_proposal_result(result, pr)
+
+        pr = replace(pr, body="Related: https://github.com/acme/api/pull/731")
+        with self.assertRaisesRegex(automation.AutomationError, "not linked"):
+            automation.validate_proposal_result(result, pr)
+
+        pr = replace(pr, body="Related: https://github.com/acme/api/pull/73/")
+        automation.validate_proposal_result(result, pr)
+
     def _delta_result(
         self,
         *,
@@ -32,6 +171,16 @@ class ReviewAutomationTests(unittest.TestCase):
             "baseline_head_sha": baseline_head_sha,
             "event": "COMMENT" if findings else "APPROVE",
             "published": False,
+            "product_context": {
+                "change_type": "fix",
+                "why": "Persisted prices can be overwritten.",
+                "current_behavior": "A failed worker may replace the saved price.",
+                "planned_behavior": "The saved price remains intact after worker failure.",
+                "pr_scope": "Updates price persistence and worker handling.",
+                "delivery_stage": "implementation",
+                "related_prs": [],
+                "source_paths": ["price.py"],
+            },
             "objective": "Protect persisted prices",
             "summary": "Re-reviewed the latest revision.",
             "findings": list(findings),
@@ -90,6 +239,16 @@ class ReviewAutomationTests(unittest.TestCase):
             "baseline_head_sha": None,
             "event": "COMMENT",
             "published": False,
+            "product_context": {
+                "change_type": "fix",
+                "why": "Persisted prices can be overwritten.",
+                "current_behavior": "A failed worker may replace the saved price.",
+                "planned_behavior": "The saved price remains intact after worker failure.",
+                "pr_scope": "Updates price persistence and worker handling.",
+                "delivery_stage": "implementation",
+                "related_prs": [],
+                "source_paths": ["price.py"],
+            },
             "objective": "Protect persisted prices",
             "summary": "Two material issues",
             "findings": [
