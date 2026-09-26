@@ -437,7 +437,7 @@ exit 2
     def test_runtime_verification_checks_private_workflow_contract(self):
         self.assertIn("review-reminder", VERIFY)
         self.assertIn("schema_version", VERIFY)
-        self.assertIn("== 4", VERIFY)
+        self.assertIn("== 5", VERIFY)
         self.assertIn("review-result.schema.json", VERIFY)
         self.assertIn("workflow_pr_conversations", VERIFY)
         self.assertIn("slack-pr-review-gate", VERIFY)

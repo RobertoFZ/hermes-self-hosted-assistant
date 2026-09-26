@@ -433,6 +433,78 @@ class SlackReviewPolicyTests(unittest.TestCase):
         )
         self.assertIsNone(result)
 
+    def test_owner_dm_with_pr_url_schedules_review(self):
+        request = event(
+            "U_OWNER", "D_OWNER", "Review https://github.com/acme/api/pull/42"
+        )
+        with patch.object(self.plugin, "_schedule_source_request") as scheduled:
+            result = self.plugin._review_only_policy(request, gateway=gateway())
+        self.assertEqual(result["reason"], "review-scheduled")
+        self.assertEqual(scheduled.call_args.args[3], ["https://github.com/acme/api/pull/42"])
+
+    def test_owner_dm_keeps_focused_objective_separate_from_pr_url(self):
+        request = event(
+            "U_OWNER", "D_OWNER",
+            "Review https://github.com/acme/api/pull/42. Focus on failed worker writes.",
+        )
+        self.assertEqual(
+            self.plugin._owner_dm_focus(
+                request, ["https://github.com/acme/api/pull/42"]
+            ),
+            "Focus on failed worker writes.",
+        )
+
+    def test_owner_dm_slack_link_does_not_create_an_accidental_focus(self):
+        url = "https://github.com/acme/api/pull/42"
+        request = event("U_OWNER", "D_OWNER", f"Review <{url}|PR 42>")
+        self.assertEqual(self.plugin._owner_dm_focus(request, [url]), "")
+
+    def test_owner_dm_passes_focus_to_review_automation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            request = event(
+                "U_OWNER", "D_OWNER",
+                "Review https://github.com/acme/api/pull/42. Focus on failed worker writes.",
+            )
+            adapter = FakeSlackAdapter()
+            self.plugin._AUTOMATION = automation
+            with (
+                patch.dict(os.environ, {"REVIEW_HISTORY_DB": str(database)}, clear=False),
+                patch.object(automation, "reviewer_login", return_value="review-bot"),
+                patch.object(automation, "propose_one", return_value={"status": "in_progress"}) as propose,
+            ):
+                asyncio.run(self.plugin._run_source_request(
+                    adapter, request.source, request,
+                    ["https://github.com/acme/api/pull/42"],
+                ))
+        self.assertEqual(
+            propose.call_args.kwargs["requested_focus"],
+            "Focus on failed worker writes.",
+        )
+
+    def test_owner_url_in_unrelated_channel_keeps_normal_access(self):
+        request = event("U_OWNER", "C_OTHER", "https://github.com/acme/api/pull/42")
+        with patch.object(self.plugin, "_schedule_source_request") as scheduled:
+            result = self.plugin._review_only_policy(request, gateway=gateway())
+        self.assertIsNone(result)
+        scheduled.assert_not_called()
+
+    def test_mapped_owner_dm_with_new_pr_url_stays_in_existing_review_thread(self):
+        request = event(
+            "U_OWNER",
+            "D_OWNER",
+            "What about https://github.com/acme/api/pull/43?",
+            raw_message={"thread_ts": "100.2"},
+        )
+        route = {"id": "conversation-1", "proposal_id": "proposal-1"}
+        with (
+            patch.object(self.plugin, "_lookup_private_route", return_value=route),
+            patch.object(self.plugin, "_schedule_source_request") as scheduled,
+        ):
+            result = self.plugin._review_only_policy(request, gateway=gateway())
+        self.assertEqual(result["action"], "rewrite")
+        scheduled.assert_not_called()
+
     def test_mapped_owner_dm_is_resolved_before_normal_owner_bypass(self):
         request = event(
             "U_OWNER",

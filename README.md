@@ -21,7 +21,7 @@ through ignored runtime files.
 - Hermes-to-Paseo delegation of exact PR review requests
 - GitHub CLI OAuth for read-only proposal analysis and explicitly confirmed
   `APPROVE` or `COMMENT` actions
-- SQLite schema v3 history for requests, private proposals, decisions, delivery
+- SQLite schema v5 history for requests, private proposals, decisions, delivery
   receipts, reminders, and GitHub-verified publications
 - Linear issue snapshots and normalized findings for later analysis
 - Private Slack PR threads, bounded reminders, and a daily DM digest at 17:00
@@ -286,6 +286,15 @@ docker compose exec -T --user hermes hermes gh auth setup-git
 The Slack policy behaves as follows:
 
 - The configured owner keeps normal assistant access outside the review channel.
+- In a new one-to-one DM with Hermes, an exact allowed PR URL starts the same
+  tracked review workflow. Other owner DM messages keep normal assistant access.
+  Replies inside a mapped proposal thread stay with that proposal, even if they
+  contain another PR URL.
+- An owner can add a focused objective to that new DM, such as `Review
+  https://github.com/OWNER/REPO/pull/123. Focus on failed worker writes.`
+  Hermes preserves the objective and creates a fresh proposal revision for that
+  PR, including when the commit has not changed. It stays in the existing
+  private PR thread and needs a new decision command.
 - The configured owner is the only Slack slash-command administrator in both
   direct messages and channels.
 - Delegated reviewers can use only Hermes' always-available `/help` and
@@ -310,6 +319,11 @@ The Slack policy behaves as follows:
 - Each requested PR gets one top-level DM summary for the decision owner; its
   questions, proposal changes, reminders, re-reviews, and action stay in that
   message thread.
+- A question in that thread may inspect the PR diff and code at the reviewed
+  commit read-only. For endpoint questions, Hermes may also inspect configured
+  sibling submodules and a verified related frontend PR at its exact head.
+  Hermes reports the checked commits and file evidence; a question does not
+  start another review, change candidate comments, or authorize GitHub publication.
 - After the first terminal outcome, the original request thread gets one
   compact verdict message. The gate edits that message as sibling PRs finish
   instead of posting another message.

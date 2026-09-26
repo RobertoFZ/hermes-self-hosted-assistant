@@ -29,7 +29,7 @@ docker compose exec -T --user hermes hermes /bin/sh -eu -c '
   /opt/review-workspace/prepare-workspace.sh --check
   test -f /opt/review-automation/review-result.schema.json
   python3 -c "import json,sys; schema=json.load(open(\"/opt/review-automation/review-result.schema.json\", encoding=\"utf-8\")); valid=schema.get(\"properties\", {}).get(\"published\") == {\"type\": \"boolean\", \"const\": False} and {\"objective\", \"baseline_head_sha\", \"delta\"} <= set(schema.get(\"required\", [])); sys.exit(0 if valid else \"The deployed review-result.schema.json is not the read-only proposal contract\")"
-  python3 /opt/review-automation/review_automation.py init | python3 -c "import json,sys; payload=json.load(sys.stdin); sys.exit(0 if payload.get(\"schema_version\") == 4 else \"Review database schema v4 is not ready\")"
+  python3 /opt/review-automation/review_automation.py init | python3 -c "import json,sys; payload=json.load(sys.stdin); sys.exit(0 if payload.get(\"schema_version\") == 5 else \"Review database schema v5 is not ready\")"
   python3 -c "import os,sqlite3,sys; db=sqlite3.connect(os.environ[\"REVIEW_HISTORY_DB\"]); tables={row[0] for row in db.execute(\"SELECT name FROM sqlite_master WHERE type=\\\"table\\\"\")}; required={\"workflow_pr_conversations\",\"proposal_revisions\",\"proposal_decisions\",\"slack_deliveries\",\"proposal_reminders\",\"analysis_attempts\"}; sys.exit(0 if required <= tables else \"Private review workflow tables are missing\")"
   python3 /opt/review-tooling/sync_crons.py --check
   python3 -c "import json,os,sys; state=json.load(open(os.environ[\"REVIEW_CRON_STATE\"], encoding=\"utf-8\")); sys.exit(0 if set(state) == {\"daily-review-digest\", \"pr-review-reminders\"} else \"Both managed cron jobs must be synchronized\")"
@@ -105,4 +105,4 @@ docker compose exec -T --user hermes paseo /bin/sh -eu -c '
   check-linear-mcp-capabilities >/dev/null
 '
 
-echo "Hermes private PR confirmation, schema v4, proposal quality policy, both managed cron jobs, Codex skills and plugins, Paseo, GitHub verification, and workspace are ready."
+echo "Hermes private PR confirmation, schema v5, proposal quality policy, both managed cron jobs, Codex skills and plugins, Paseo, GitHub verification, and workspace are ready."

@@ -217,6 +217,22 @@ def _slack_command_text(event: Any) -> str:
     return text
 
 
+def _owner_dm_focus(event: Any, urls: list[str]) -> str:
+    focus = _slack_primary_text(event)
+    for url in urls:
+        focus = re.sub(rf"<{re.escape(url)}(?:\|[^>]*)?>", " ", focus)
+        focus = focus.replace(url, " ")
+    focus = _USER_MENTION_RE.sub(" ", focus)
+    focus = " ".join(focus.split())
+    focus = re.sub(
+        r"^(?:please\s+)?(?:review|revisa|revisar)\b[\s.:,-]*",
+        "",
+        focus,
+        flags=re.IGNORECASE,
+    )
+    return focus.lstrip(" .:,-").strip()
+
+
 def _has_bot_review_intent(text: str) -> bool:
     normalized = unicodedata.normalize("NFKD", text or "")
     folded = "".join(char for char in normalized if not unicodedata.combining(char))
@@ -689,6 +705,11 @@ async def _run_source_request(
     workspace_id = str(getattr(source, "scope_id", "") or "")
     channel_id = str(getattr(source, "chat_id", "") or "")
     message_ts = str(getattr(event, "message_id", "") or "")
+    requested_focus = (
+        _owner_dm_focus(event, urls)
+        if user_id in OWNER_USER_IDS and channel_id.startswith("D")
+        else ""
+    )
     _REQUESTER_ACTIVE[user_id] = _REQUESTER_ACTIVE.get(user_id, 0) + 1
     try:
         await _set_request_reaction(adapter, channel_id, message_ts, workspace_id, "eyes")
@@ -723,6 +744,7 @@ async def _run_source_request(
                             owner_user_id=DECISION_OWNER_USER_ID,
                             position=position,
                             claimant=f"slack:{workspace_id}:{message_ts}:{position}",
+                            **({"requested_focus": requested_focus} if requested_focus else {}),
                         )
                 return await asyncio.to_thread(run_one)
 
@@ -841,10 +863,13 @@ def _private_question_rewrite(source: Any, event: Any, route: dict[str, Any]) ->
     return {
         "action": "rewrite",
         "text": (
-            "Use the codex-pr-review skill for a read-only clarification in the "
-            "mapped private PR thread. Use only the durable proposal loaded from "
-            "these trusted routing identities; do not write to GitHub or move "
-            "private content to another channel.\n"
+            "Use the codex-pr-review skill for a read-only answer in the mapped "
+            "private PR thread. Load the durable proposal from these trusted "
+            "routing identities. For questions about code behavior, verify "
+            "against the exact reviewed commit using read-only "
+            "GitHub or repository commands. For cross-submodule questions, "
+            "also check configured sibling code and a related sibling PR "
+            "when one can be verified. Keep the answer in this thread.\n"
             f"workspace_id={getattr(source, 'scope_id', '')}\n"
             f"dm_channel_id={getattr(source, 'chat_id', '')}\n"
             f"thread_ts={getattr(source, 'thread_id', '')}\n"
@@ -874,8 +899,13 @@ def _review_only_policy(event: Any, gateway: Any = None, **_kwargs: Any):
                 return {"action": "skip", "reason": "review-command-scheduled"}
             return _private_question_rewrite(source, event, route)
 
+    message_content = _slack_message_content(event)
     if user_id in OWNER_USER_IDS and not is_review_channel:
-        return None
+        if not is_direct_message:
+            return None
+        owner_urls, owner_has_unsupported_pr = _extract_allowed_pr_urls(message_content)
+        if not owner_urls and not owner_has_unsupported_pr:
+            return None
     if is_review_bot:
         if not is_review_channel:
             return {"action": "skip", "reason": "review-bot-surface-not-allowed"}
@@ -887,7 +917,6 @@ def _review_only_policy(event: Any, gateway: Any = None, **_kwargs: Any):
 
     if not DECISION_OWNER_USER_ID:
         return {"action": "skip", "reason": "review-decision-owner-not-configured"}
-    message_content = _slack_message_content(event)
     if _targets_competing_bot(event, gateway):
         return {"action": "skip", "reason": "review-addressed-to-competing-bot"}
     if is_review_bot and not _has_bot_review_intent(message_content):

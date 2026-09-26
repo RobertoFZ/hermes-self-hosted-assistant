@@ -239,6 +239,117 @@ class ReviewAutomationTests(unittest.TestCase):
             self.assertEqual(row["state"], "awaiting_decision")
             self.assertFalse(json.loads(row["structured_result"])["published"])
 
+    def test_focused_owner_request_creates_new_same_head_revision_once(self):
+        pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/42",
+            repo="acme/api",
+            number=42,
+            title="Fix persisted prices",
+            body="",
+            head_sha="a" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        result = self._delta_result(
+            head_sha=pr.head_sha, baseline_head_sha=None, status="initial"
+        )
+        focus = "Check whether a failed worker overwrites the saved price"
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, prior, _ = self._ready_proposal(db)
+                request_id, _ = automation.get_or_create_source_request(
+                    db,
+                    workspace_id="T1",
+                    channel_id="D1",
+                    message_ts="200.1",
+                    requester_user_id="U_OWNER",
+                )
+                with (
+                    patch.object(automation, "load_pr", return_value=pr),
+                    patch.object(automation, "invoke_codex", return_value=result) as invoke,
+                    patch.object(automation, "cleanup_paseo_review_agent", return_value=[]),
+                ):
+                    proposed = automation.propose_one(
+                        db, pr.url, "review-bot", request_id=request_id,
+                        workspace_id="T1", owner_user_id="U_OWNER", position=0,
+                        requested_focus=focus,
+                    )
+                    replayed = automation.propose_one(
+                        db, pr.url, "review-bot", request_id=request_id,
+                        workspace_id="T1", owner_user_id="U_OWNER", position=0,
+                        requested_focus=focus,
+                    )
+                rows = db.execute(
+                    "SELECT revision_token, state, requested_focus, source_request_id "
+                    "FROM proposal_revisions WHERE conversation_id = ? "
+                    "ORDER BY revision_number",
+                    (conversation_id,),
+                ).fetchall()
+                context = automation.proposal_context(
+                    db, conversation_id=conversation_id,
+                    revision_token=proposed["revision_token"],
+                )
+                context["conversation"] = {"pr_url": pr.url, "repo": pr.repo,
+                                           "pr_number": pr.number}
+                summary = automation.format_private_proposal(context)
+
+        self.assertEqual(proposed["revision_token"], "P2")
+        self.assertEqual(replayed["proposal_id"], proposed["proposal_id"])
+        self.assertEqual(prior["revision_token"], "P1")
+        self.assertEqual([row["state"] for row in rows], ["superseded", "awaiting_decision"])
+        self.assertEqual(rows[1]["requested_focus"], focus)
+        self.assertEqual(rows[1]["source_request_id"], request_id)
+        self.assertIn(f"Requested focus: {focus}", summary)
+        self.assertEqual(invoke.call_args.kwargs["requested_focus"], focus)
+        invoke.assert_called_once()
+
+    def test_focused_request_does_not_join_a_publishing_review(self):
+        pr = automation.PullRequest(
+            url="https://github.com/acme/api/pull/42",
+            repo="acme/api",
+            number=42,
+            title="Fix persisted prices",
+            body="",
+            head_sha="a" * 40,
+            base_ref="main",
+            author_login="developer",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, prior, _ = self._ready_proposal(db)
+                db.execute(
+                    "UPDATE proposal_revisions SET state = 'publishing' WHERE id = ?",
+                    (prior["id"],),
+                )
+                db.commit()
+                request_id, _ = automation.get_or_create_source_request(
+                    db,
+                    workspace_id="T1",
+                    channel_id="D1",
+                    message_ts="201.1",
+                    requester_user_id="U_OWNER",
+                )
+                with patch.object(automation, "load_pr", return_value=pr):
+                    with self.assertRaisesRegex(
+                        automation.AutomationError, "still publishing"
+                    ):
+                        automation.propose_one(
+                            db, pr.url, "review-bot", request_id=request_id,
+                            workspace_id="T1", owner_user_id="U_OWNER", position=0,
+                            requested_focus="Check worker writes",
+                        )
+                members = db.execute(
+                    "SELECT * FROM workflow_request_members WHERE request_id = ?",
+                    (request_id,),
+                ).fetchall()
+                active = automation.active_proposal(db, conversation_id)
+
+        self.assertEqual(members, [])
+        self.assertEqual(active["id"], prior["id"])
+        self.assertEqual(active["state"], "publishing")
+
     def test_propose_skips_pr_authored_by_authenticated_reviewer(self):
         with tempfile.TemporaryDirectory() as directory:
             database = Path(directory) / "reviews.sqlite3"
@@ -1165,11 +1276,15 @@ class ReviewAutomationTests(unittest.TestCase):
                     row["name"]
                     for row in db.execute("PRAGMA table_info(review_runs)")
                 }
+                proposal_columns = {
+                    row["name"]
+                    for row in db.execute("PRAGMA table_info(proposal_revisions)")
+                }
                 version = db.execute(
                     "SELECT MAX(version) FROM schema_migrations"
                 ).fetchone()[0]
 
-        self.assertEqual(version, 4)
+        self.assertEqual(version, 5)
         self.assertTrue(
             {
                 "cleanup_status",
@@ -1179,6 +1294,7 @@ class ReviewAutomationTests(unittest.TestCase):
             }
             <= columns
         )
+        self.assertTrue({"requested_focus", "source_request_id"} <= proposal_columns)
 
     def test_workflow_request_and_conversation_are_reused_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2189,7 +2305,8 @@ class ReviewAutomationTests(unittest.TestCase):
                         pr_url=f"https://github.com/acme/api/pull/{number}",
                     )
                     proposal = automation.create_proposal_revision(
-                        db, conversation_id, head_sha=head
+                        db, conversation_id, head_sha=head,
+                        requested_focus=("Check worker writes" if number == 3 else None),
                     )
                     state, attempt_id = automation.claim_analysis_attempt(
                         db,
@@ -2222,7 +2339,8 @@ class ReviewAutomationTests(unittest.TestCase):
                     (proposals[2][0]["id"],),
                 ).fetchone()[0]
                 latest_third = db.execute(
-                    "SELECT revision_token, head_sha, baseline_head_sha, state "
+                    "SELECT revision_token, head_sha, baseline_head_sha, "
+                    "requested_focus, state "
                     "FROM proposal_revisions WHERE conversation_id = ? "
                     "ORDER BY revision_number DESC LIMIT 1",
                     (conversations[2],),
@@ -2235,8 +2353,43 @@ class ReviewAutomationTests(unittest.TestCase):
         self.assertEqual(third_state, "superseded")
         self.assertEqual(latest_third["revision_token"], "P2")
         self.assertEqual(latest_third["head_sha"], "d" * 40)
-        self.assertEqual(latest_third["baseline_head_sha"], "c" * 40)
+        self.assertIsNone(latest_third["baseline_head_sha"])
+        self.assertEqual(latest_third["requested_focus"], "Check worker writes")
         self.assertEqual(latest_third["state"], "queued")
+
+    def test_expired_superseded_analysis_cannot_replace_focused_review(self):
+        now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reviews.sqlite3"
+            with automation.connect_db(database) as db:
+                conversation_id, _ = automation.get_or_create_pr_conversation(
+                    db, workspace_id="T1", owner_user_id="U_OWNER",
+                    repo="acme/api", pr_number=42,
+                    pr_url="https://github.com/acme/api/pull/42",
+                )
+                old = automation.create_proposal_revision(
+                    db, conversation_id, head_sha="a" * 40
+                )
+                automation.claim_analysis_attempt(
+                    db, old["id"], claimant="old", now=now - timedelta(minutes=10),
+                    lease_seconds=60,
+                )
+                focused = automation.create_proposal_revision(
+                    db, conversation_id, head_sha="a" * 40,
+                    requested_focus="Check worker writes", force_new=True,
+                )
+                reclaimed = automation.reclaim_expired_analysis(
+                    db, current_heads={("acme/api", 42): "b" * 40}, now=now
+                )
+                latest = automation.latest_proposal(db, conversation_id)
+                count = db.execute(
+                    "SELECT COUNT(*) FROM proposal_revisions WHERE conversation_id = ?",
+                    (conversation_id,),
+                ).fetchone()[0]
+
+        self.assertEqual(reclaimed[0]["outcome"], "superseded")
+        self.assertEqual(latest["id"], focused["id"])
+        self.assertEqual(count, 2)
 
     def test_reclaimed_output_is_persisted_without_running_codex_again(self):
         now = datetime(2026, 9, 17, 15, 0, tzinfo=timezone.utc)
@@ -3037,7 +3190,9 @@ class ReviewAutomationTests(unittest.TestCase):
                 "REVIEW_PASEO_TIMEOUT": "45m",
             },
         ), patch.object(automation, "run", return_value=completed) as run_command:
-            result = automation.invoke_codex(pr, run_id="run-456")
+            result = automation.invoke_codex(
+                pr, run_id="run-456", requested_focus="Check failed worker writes"
+            )
 
         self.assertEqual(result, {"repo": "acme/api"})
         command = run_command.call_args.args[0]
@@ -3048,6 +3203,7 @@ class ReviewAutomationTests(unittest.TestCase):
         self.assertEqual(automation.PASEO_REVIEW_PROVIDER, "codex-review")
         label_index = command.index("--label")
         self.assertEqual(command[label_index + 1], "hermes-review-run=run-456")
+        self.assertIn('REQUESTED_FOCUS="Check failed worker writes"', command[-1])
 
     def test_structured_result_can_be_recovered_from_paseo_logs(self):
         pr = automation.PullRequest(
