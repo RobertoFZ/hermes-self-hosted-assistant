@@ -55,8 +55,5 @@ exec setpriv \
   --reuid="$HERMES_UID" \
   --regid="$HERMES_GID" \
   --clear-groups \
-  paseo daemon start \
-    --foreground \
-    --web-ui \
-    --listen 0.0.0.0:6767 \
+  paseo daemon run \
     --home "$PASEO_HOME"

@@ -165,7 +165,7 @@ full stack without rerunning first-install synchronization.
 The Hermes image contains Hermes, GitHub CLI, and the Paseo client used to
 delegate work. The separate Paseo image contains the standalone Codex CLI,
 OpenSpec, and Paseo daemon. The default pins are Codex `0.156.0`, OpenSpec
-`1.10.0`, and Paseo `0.5.2`; override these only after validating the new
+`1.10.0`, and Paseo `0.9.2`; override these only after validating the new
 versions.
 
 Authenticate the ChatGPT/Codex subscription interactively:

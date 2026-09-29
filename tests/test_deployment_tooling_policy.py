@@ -363,9 +363,9 @@ exit 2
         self.assertIn('generatedBy: \\"$OPENSPEC_VERSION\\"', VERIFY)
 
     def test_paseo_is_pinned_in_the_image(self):
-        self.assertIn("ARG PASEO_VERSION=0.5.2", DOCKERFILE)
+        self.assertIn("ARG PASEO_VERSION=0.9.2", DOCKERFILE)
         self.assertIn('@getpaseo/cli@${PASEO_VERSION}', DOCKERFILE)
-        self.assertIn('PASEO_VERSION: "${PASEO_VERSION:-0.5.2}"', COMPOSE)
+        self.assertIn('PASEO_VERSION: "${PASEO_VERSION:-0.9.2}"', COMPOSE)
         self.assertIn("!scripts/paseo-entrypoint.sh", DOCKERIGNORE)
         self.assertIn("!scripts/paseo-config.json", DOCKERIGNORE)
 
@@ -373,7 +373,14 @@ exit 2
         self.assertIn('"127.0.0.1:${PASEO_HOST_PORT:-6767}:6767"', COMPOSE)
         self.assertIn('PASEO_PASSWORD: "${PASEO_PASSWORD:?set it in .env}"', COMPOSE)
         self.assertIn('PASEO_HOSTNAMES: "paseo"', COMPOSE)
+        self.assertIn('PASEO_LISTEN: "0.0.0.0:6767"', COMPOSE)
+        self.assertIn('PASEO_WEB_UI_ENABLED: "true"', COMPOSE)
         self.assertIn("- hermes-data:/opt/data", COMPOSE)
+        self.assertIn("paseo daemon run", PASEO_ENTRYPOINT)
+        self.assertNotIn("paseo daemon start", PASEO_ENTRYPOINT)
+        self.assertNotIn("--foreground", PASEO_ENTRYPOINT)
+        self.assertNotIn("--web-ui", PASEO_ENTRYPOINT)
+        self.assertNotIn("--listen", PASEO_ENTRYPOINT)
         self.assertIn("--reuid=\"$HERMES_UID\"", PASEO_ENTRYPOINT)
         self.assertNotIn("chown -R", PASEO_ENTRYPOINT)
         self.assertIn('"dictation": {', PASEO_CONFIG)

@@ -6,7 +6,7 @@ services:
       dockerfile: Dockerfile
       args:
         HERMES_BASE_IMAGE: "${HERMES_BASE_IMAGE:-nousresearch/hermes-agent:latest}"
-        PASEO_VERSION: "${PASEO_VERSION:-0.5.2}"
+        PASEO_VERSION: "${PASEO_VERSION:-0.9.2}"
     image: "${HERMES_LOCAL_IMAGE:-hermes-self-hosted-assistant:local}"
     restart: unless-stopped
     command: ["gateway", "run"]
@@ -102,7 +102,7 @@ services:
         HERMES_GID: "${HERMES_GID:-10000}"
         CODEX_VERSION: "${CODEX_VERSION:-0.156.0}"
         OPENSPEC_VERSION: "${OPENSPEC_VERSION:-1.10.0}"
-        PASEO_VERSION: "${PASEO_VERSION:-0.5.2}"
+        PASEO_VERSION: "${PASEO_VERSION:-0.9.2}"
     image: "${PASEO_LOCAL_IMAGE:-self-assistant-paseo:local}"
     restart: unless-stopped
     entrypoint: ["/usr/local/bin/paseo-entrypoint"]
@@ -120,6 +120,8 @@ services:
       HERMES_GID: "${HERMES_GID:-10000}"
       PASEO_HOME: "/opt/data/.paseo"
       PASEO_PASSWORD: "${PASEO_PASSWORD:?set it in .env}"
+      PASEO_LISTEN: "0.0.0.0:6767"
+      PASEO_WEB_UI_ENABLED: "true"
       # Allow the Compose service hostname used by Hermes while retaining
       # Paseo's default localhost and IP-address allowances.
       PASEO_HOSTNAMES: "paseo"
