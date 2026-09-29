@@ -3,7 +3,7 @@ FROM ${HERMES_BASE_IMAGE}
 
 USER root
 
-ARG PASEO_VERSION=0.5.2
+ARG PASEO_VERSION=0.9.2
 ENV PASEO_VERSION="${PASEO_VERSION}"
 
 # Hermes delegates PR review tasks to Paseo and uses GitHub CLI for the review
