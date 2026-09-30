@@ -274,13 +274,13 @@ exit 2
         )
 
     def test_codex_cli_is_pinned_in_the_image(self):
-        self.assertIn("ARG CODEX_VERSION=0.156.0", PASEO_DOCKERFILE)
+        self.assertIn("ARG CODEX_VERSION=0.159.2", PASEO_DOCKERFILE)
         self.assertIn(
             "bubblewrap", PASEO_DOCKERFILE
         )
         self.assertIn('@openai/codex@${CODEX_VERSION}', PASEO_DOCKERFILE)
         self.assertIn("--ignore-scripts", PASEO_DOCKERFILE)
-        self.assertIn('CODEX_VERSION: "${CODEX_VERSION:-0.156.0}"', COMPOSE)
+        self.assertIn('CODEX_VERSION: "${CODEX_VERSION:-0.159.2}"', COMPOSE)
 
     def test_runtime_verification_checks_codex_version_and_auth(self):
         self.assertIn(
